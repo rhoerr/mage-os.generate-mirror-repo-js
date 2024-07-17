@@ -29,6 +29,11 @@ on:
         required: false
         default: ''
         type: string
+      release_refs_file:
+        description: 'JS file exporting a map with the git ref to use for each package (to pin to a past commit)'
+        required: false
+        default: ''
+        type: string
       publish_tag:
         description: 'Push new release tag to repos'
         required: false
@@ -47,6 +52,7 @@ jobs:
       delete: false
       mageos_release: ${{ inputs.mageos_release }}
       upstream_release: ${{ inputs.upstream_release }}
+      release_refs_file: ${{ inputs.release_refs_file }}
       publish_tag: ${{ inputs.publish_tag }}
 
     secrets:

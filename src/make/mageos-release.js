@@ -17,7 +17,7 @@ const {buildConfig: releaseInstructions} = require('./../build-config/mageos-rel
 const {processMirrorInstruction} = require("../mirror-build-tools");
 
 const options = parseOptions(
-  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $upstreamRelease @skipHistory @help|h`,
+  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $releaseRefsFile $upstreamRelease @skipHistory @help|h`,
   process.argv
 );
 
