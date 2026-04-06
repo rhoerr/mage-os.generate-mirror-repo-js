@@ -124,6 +124,7 @@ async function transformMageOSMinimalProduct(composerConfig, instruction, metapa
     `${instruction.vendor}/module-message-queue`,
     `${instruction.vendor}/module-mysql-mq`,
     `${instruction.vendor}/module-newsletter`,
+    `${instruction.vendor}/module-offline-shipping`,
     `${instruction.vendor}/module-open-search`,
     `${instruction.vendor}/module-order-cancellation`,
     `${instruction.vendor}/module-order-cancellation-ui`,

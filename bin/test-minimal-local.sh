@@ -29,6 +29,16 @@ build() {
   log "Clearing previous build"
   rm -rf "${BUILD_DIR}"
 
+  log "Clearing stale upstream workdir for ${UPSTREAM_RELEASE}"
+  rm -rf "$(php -r 'echo sys_get_temp_dir();')/workdir-${UPSTREAM_RELEASE}"
+
+  log "Clearing stale tags and prep-release branches for ${MAGEOS_RELEASE}"
+  for repo_dir in generate-repo/repositories/*/; do
+    git -C "${repo_dir}" checkout main 2>/dev/null || true
+    git -C "${repo_dir}" tag -d "${MAGEOS_RELEASE}" 2>/dev/null || true
+    git -C "${repo_dir}" branch -D "prep-release/mage-os-${MAGEOS_RELEASE}" 2>/dev/null || true
+  done
+
   log "Generating minimal release packages (mageosRelease=${MAGEOS_RELEASE} upstreamRelease=${UPSTREAM_RELEASE})"
   node src/make/mageos-release.js \
     --outputDir="${BUILD_DIR}/packages" \
