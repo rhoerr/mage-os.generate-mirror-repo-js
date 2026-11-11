@@ -19,6 +19,11 @@ on:
         options:
           - /var/www/preview-mirror.mage-os.org/html/
           - /var/www/mirror.mage-os.org/html/
+      allow_ledger_changes:
+        description: 'Deploy and record changed or missing already published packages instead of failing'
+        required: false
+        default: false
+        type: boolean
 
 # One build per deploy target at a time; queue rather than cancel so an
 # in-progress rsync is never interrupted mid-deploy
@@ -31,15 +36,30 @@ jobs:
     uses: ./.github/workflows/deploy.yml
     name: "generate & deploy"
     if: contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor)
+    permissions:
+      contents: read
     with:
       repo: ${{ (github.event_name == 'workflow_dispatch' && inputs.repo) || 'https://preview-mirror.mage-os.org/' }}
       remote_dir: ${{ (github.event_name == 'workflow_dispatch' && inputs.remote_dir) || '/var/www/preview-mirror.mage-os.org/html/' }}
       entrypoint: src/make/mirror.js
       delete: true
+      ledger: mirror
+      enforce_ledger: ${{ inputs.repo == 'https://mirror.mage-os.org/' || inputs.remote_dir == '/var/www/mirror.mage-os.org/html/' }}
+      allow_ledger_changes: ${{ inputs.allow_ledger_changes == true }}
     secrets:
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
       REMOTE_USER: ${{ secrets.REMOTE_USER }}
       REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+
+  record-ledger:
+    uses: ./.github/workflows/record-ledger.yml
+    name: "record ledger"
+    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) && (inputs.repo == 'https://mirror.mage-os.org/' || inputs.remote_dir == '/var/www/mirror.mage-os.org/html/') }}
+    permissions:
+      contents: write
+      actions: read
+    with:
+      ledger: mirror
 
   integrity-check:
     needs: [deploy]

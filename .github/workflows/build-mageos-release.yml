@@ -39,6 +39,11 @@ on:
         required: false
         default: false
         type: boolean
+      allow_ledger_changes:
+        description: 'Deploy and record changed or missing already published packages instead of failing'
+        required: false
+        default: false
+        type: boolean
 
 # One release build per target repo at a time; never auto-cancel a release
 # mid-deploy or mid-tag-push
@@ -51,6 +56,8 @@ jobs:
     uses: ./.github/workflows/deploy.yml
     name: "generate & deploy"
     if: contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor)
+    permissions:
+      contents: read
     with:
       repo: ${{ inputs.repo }}
       remote_dir: ${{ inputs.remote_dir }}
@@ -60,11 +67,24 @@ jobs:
       upstream_release: ${{ inputs.upstream_release }}
       publish_tag: ${{ inputs.publish_tag }}
       release_refs_file: ${{ inputs.release_refs_file }}
+      ledger: release
+      enforce_ledger: ${{ inputs.repo == 'https://repo.mage-os.org/' || inputs.remote_dir == '/var/www/repo.mage-os.org/html/' }}
+      allow_ledger_changes: ${{ inputs.allow_ledger_changes }}
+      allow_ledger_alias_repoint: true
 
     secrets:
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
       REMOTE_USER: ${{ secrets.REMOTE_USER }}
       REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+  record-ledger:
+    uses: ./.github/workflows/record-ledger.yml
+    name: "record ledger"
+    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) && (inputs.repo == 'https://repo.mage-os.org/' || inputs.remote_dir == '/var/www/repo.mage-os.org/html/') }}
+    permissions:
+      contents: write
+      actions: read
+    with:
+      ledger: release
   compute-release-service-versions:
     runs-on: ubuntu-latest
     outputs:
