@@ -83,7 +83,9 @@ env:
   release_refs_file_arg: ${{ inputs.release_refs_file != '' && format('--releaseRefsFile="{0}"', inputs.release_refs_file) || '' }}
   publish_tag: ${{ inputs.publish_tag }}
   ledger_file: ${{ inputs.ledger != '' && format('resource/ledger/{0}.tsv', inputs.ledger) || '' }}
-  ledger_mode_arg: ${{ inputs.enforce_ledger && '--mode=gate --update' || '--mode=report --expectDiff="*/project-community-edition-*,*/project-minimal-edition-*"' }}
+  refs_file: ${{ inputs.ledger != '' && format('resource/ledger/{0}-refs.tsv', inputs.ledger) || '' }}
+  refs_out_arg: ${{ inputs.ledger != '' && '--refsOut="$RUNNER_TEMP/refs-pending.json"' || '' }}
+  ledger_mode_arg: ${{ inputs.enforce_ledger && '--mode=gate --update --refs="$refs_file" --pendingRefs="$RUNNER_TEMP/refs-pending.json"' || '--mode=report --expectDiff="*/project-community-edition-*,*/project-minimal-edition-*"' }}
   ledger_alias_repoint_arg: ${{ inputs.ledger == 'release' && '--allowAliasRepoint' || '' }}
 
 jobs:
@@ -118,7 +120,7 @@ jobs:
 
       - run: |
           node ${{ env.entrypoint }} --outputDir=build/packages --gitRepoDir=generate-repo/repositories --repoUrl="${{ env.repo }}" \
-            ${{ env.mageos_release_arg }} ${{ env.upstream_release_arg }} ${{ env.release_refs_file_arg }}
+            ${{ env.mageos_release_arg }} ${{ env.upstream_release_arg }} ${{ env.release_refs_file_arg }} ${{ env.refs_out_arg }}
         name: "Generate the packages for the composer repo"
 
       # Composer create-project and composer require have limited support for commit hashes, they check composer-plugin-api constraints
@@ -159,13 +161,16 @@ jobs:
         if: ${{ inputs.ledger != '' && inputs.enforce_ledger }}
         with:
           name: package-ledger-${{ inputs.ledger }}-${{ github.run_attempt }}
-          path: ${{ env.ledger_file }}
+          path: |
+            ${{ env.ledger_file }}
+            ${{ env.refs_file }}
           if-no-files-found: error
       # Nothing is uploaded before the ledger is on the branch, so the server never has a version the ledger does not know about
       - run: |
           for attempt in $(seq 1 60); do
             git fetch --quiet origin "$GITHUB_REF_NAME"
-            if git show "FETCH_HEAD:$ledger_file" | cmp --silent - "$ledger_file"; then
+            if git show "FETCH_HEAD:$ledger_file" | cmp --silent - "$ledger_file" \
+              && git show "FETCH_HEAD:$refs_file" | cmp --silent - "$refs_file"; then
               exit 0
             fi
             sleep 15

@@ -1603,4 +1603,23 @@ describe('shell-git', () => {
         .toBe('/base/dir/test-repo');
     });
   });
+
+  describe('parseRemoteTags', () => {
+    it('maps annotated tags to the commit they point at, and lightweight tags to their own sha', () => {
+      const tagObject = 'a'.repeat(40);
+      const annotatedCommit = 'b'.repeat(40);
+      const lightweight = 'c'.repeat(40);
+      const out = [
+        `${tagObject}\trefs/tags/2.4.7`,
+        `${lightweight}\trefs/tags/2.4.6-p1`,
+        `${annotatedCommit}\trefs/tags/2.4.7^{}`,
+        '',
+      ].join('\n');
+
+      expect(sut.testing.parseRemoteTags(out)).toEqual(new Map([
+        ['2.4.7', annotatedCommit],
+        ['2.4.6-p1', lightweight],
+      ]));
+    });
+  });
 });

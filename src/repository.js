@@ -23,6 +23,9 @@ module.exports = {
   async listTags(url) {
     return git.listTags(url)
   },
+  async listRemoteTags(url) {
+    return git.listRemoteTags(url)
+  },
   async checkout(url, ref) {
     return git.checkout(url, ref);
   },

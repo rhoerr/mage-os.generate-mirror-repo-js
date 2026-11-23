@@ -12,6 +12,8 @@ const buildState = require('./type/build-state');
 
 let archiveBaseDir = 'packages';
 
+let published = null;
+
 const stableMtime = '2022-02-22 22:02:22.000Z';
 
 function report() {
@@ -69,6 +71,37 @@ async function readComposerJson(url, dir, ref) {
 function ensureArchiveDirectoryExists(archivePath) {
   const packageDir = path.dirname(archivePath);
   if (!fs.existsSync(packageDir)) fs.mkdirSync(packageDir, {recursive: true});
+}
+
+/**
+ * @param {Array<{name: String, version: String, path: String}>|null} rows Package ledger rows to skip, null builds everything
+ */
+function setPublishedVersions(rows) {
+  published = rows && {
+    versions: new Set(rows.map(row => `${row.name} ${row.version}`)),
+    paths: new Set(rows.map(row => row.path)),
+  };
+}
+
+function isPublished(name, version) {
+  return published !== null && published.versions.has(`${name} ${version}`);
+}
+
+/**
+ * @param {String} relativePath Archive path below the archive base dir
+ * @param {String} zipFile The archive
+ */
+async function isPublishedArchive(relativePath, zipFile) {
+  if (published === null) {
+    return false;
+  }
+  if (published.paths.has(relativePath)) {
+    return true;
+  }
+  const zip = await JSZip.loadAsync(fs.readFileSync(zipFile));
+  const composerJson = zip.file('composer.json');
+  const {name, version} = composerJson ? JSON.parse(await composerJson.async('string')) : {};
+  return isPublished(name, version);
 }
 
 function archiveFilePath(name, version) {
@@ -365,6 +398,9 @@ async function createPackageForRef(instruction, pkg, release) {
     version
   } = chooseNameAndVersion(instruction, pkg, magentoName, JSON.stringify(composerConfig), (release.dependencyVersions[composerConfig.name] ?? null), release.fallbackVersion));
   const packageWithVersion = {[name]: version};
+  if (isPublished(name, version)) {
+    return packageWithVersion;
+  }
 
   // Use fixed date for stable package checksum generation
   const mtime = new Date(stableMtime);
@@ -467,6 +503,9 @@ function isInAdditionalPackages(name, version) {
  * @returns {Promise: <{packageFilepath: String, files: {filepath:String, mtime: Date, contentBugger: Buffer, isExecutable: Boolean}}>}
  */
 async function createComposerJsonOnlyPackage(instruction, release, name, version, transform) {
+  if (isPublished(name, version || release.ref)) {
+    return {packageFilepath: archiveFilePath(name, version || release.ref), files: []};
+  }
   const refComposerConfig = JSON.parse(await readComposerJson(instruction.repoUrl, '', release.ref));
 
   const composerConfig = await transform(refComposerConfig, instruction, release);
@@ -779,6 +818,9 @@ async function createMetaPackageFromRepoDir(instruction, pkg, release) {
     throw {message: `Unable find package name and in composer.json for metapackage ${release.ref} in ${pkg.dir}`}
   }
   version = release.version || release.dependencyVersions[name] || version || release.fallbackVersion || release.ref;
+  if (isPublished(name, version)) {
+    return {[name]: version};
+  }
 
   // Ensure version is set on composer config because not all repos provide the version in composer.json (e.g.
   // page-builder) and it is required by satis to be able to use artifact repositories.
@@ -863,7 +905,7 @@ async function createMetaPackage(instruction, metapackage, release) {
 
   const packageFilepath = archiveFilePath(packageName, composerConfig.version);
 
-  if (!isInAdditionalPackages(packageName, composerConfig.version)) {
+  if (!isInAdditionalPackages(packageName, composerConfig.version) && !isPublished(packageName, composerConfig.version)) {
     await writePackage(packageFilepath, files);
   }
 
@@ -874,6 +916,9 @@ module.exports = {
   setArchiveBaseDir(newArchiveBaseDir) {
     archiveBaseDir = newArchiveBaseDir;
   },
+  setPublishedVersions,
+  isPublished,
+  isPublishedArchive,
   createPackageForRef,
   createPackagesForRef,
   createMetaPackageFromRepoDir,

@@ -1645,3 +1645,104 @@ describe('Error handling', () => {
     expect(result).toEqual({});
   });
 });
+
+describe('published versions', () => {
+  let mockZip;
+  const published = (name, version) => ({name, version, path: `${name}-${version}.zip`});
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockZip = {
+      file: jest.fn(),
+      generateNodeStream: jest.fn().mockImplementation(endedStream),
+    };
+    JSZip.mockImplementation(() => mockZip);
+    fs.existsSync.mockReturnValue(false);
+    fs.mkdirSync.mockImplementation(() => {});
+    fs.createWriteStream.mockImplementation(() => new PassThrough());
+    repo.listFiles.mockResolvedValue([]);
+    sut.setArchiveBaseDir('packages');
+    process.cwd = jest.fn().mockReturnValue('/project');
+  });
+
+  afterEach(() => {
+    sut.setPublishedVersions(null);
+  });
+
+  it('builds everything without a ledger', async () => {
+    expect(sut.isPublished('magento/module-catalog', '103.0.5')).toBe(false);
+    expect(await sut.isPublishedArchive('additional/a.zip', '/a.zip')).toBe(false);
+  });
+
+  it('createPackageForRef returns a published version without listing or writing files', async () => {
+    sut.setPublishedVersions([published('magento/module-catalog', '103.0.5')]);
+    repo.readFile.mockResolvedValue(Buffer.from(JSON.stringify(createMockComposerConfig())));
+
+    const result = await sut.createPackageForRef(createMockInstruction(), createMockPackage(), createMockRelease());
+
+    expect(result).toEqual({'magento/module-catalog': '103.0.5'});
+    expect(repo.listFiles).not.toHaveBeenCalled();
+    expect(mockZip.generateNodeStream).not.toHaveBeenCalled();
+  });
+
+  it('createPackageForRef still builds versions the ledger does not have', async () => {
+    sut.setPublishedVersions([published('magento/module-catalog', '103.0.4')]);
+    repo.readFile.mockResolvedValue(Buffer.from(JSON.stringify(createMockComposerConfig())));
+
+    await sut.createPackageForRef(createMockInstruction(), createMockPackage(), createMockRelease());
+
+    expect(mockZip.generateNodeStream).toHaveBeenCalled();
+  });
+
+  it('createComposerJsonOnlyPackage skips a published version without reading the tag', async () => {
+    sut.setPublishedVersions([published('magento/project-community-edition', '2.4.6')]);
+    const transform = jest.fn();
+
+    const result = await sut.createComposerJsonOnlyPackage(
+      createMockInstruction(), createMockRelease(), 'magento/project-community-edition', '2.4.6', transform
+    );
+
+    expect(result).toEqual({packageFilepath: '/project/packages/magento/project-community-edition-2.4.6.zip', files: []});
+    expect(repo.readFile).not.toHaveBeenCalled();
+    expect(transform).not.toHaveBeenCalled();
+  });
+
+  it('createMetaPackageFromRepoDir skips a published version', async () => {
+    sut.setPublishedVersions([published('magento/module-catalog', '2.4.6')]);
+    repo.readFile.mockResolvedValue(Buffer.from(JSON.stringify(createMockComposerConfig({version: undefined}))));
+
+    const result = await sut.createMetaPackageFromRepoDir(createMockInstruction(), createMockPackage(), createMockRelease());
+
+    expect(result).toEqual({'magento/module-catalog': '2.4.6'});
+    expect(mockZip.generateNodeStream).not.toHaveBeenCalled();
+  });
+
+  it('createMetaPackage skips a published version', async () => {
+    sut.setPublishedVersions([published('mage-os/product-community-edition', '2.0.0')]);
+    repo.readFile.mockResolvedValue(Buffer.from(JSON.stringify({name: 'magento/magento2-base', require: {}})));
+
+    const result = await sut.createMetaPackage(
+      createMockInstruction({vendor: 'mage-os'}),
+      {name: 'product-community-edition', type: 'metapackage', transform: []},
+      createMockRelease({version: '2.0.0'})
+    );
+
+    expect(result).toEqual({'mage-os/product-community-edition': '2.0.0'});
+    expect(mockZip.generateNodeStream).not.toHaveBeenCalled();
+  });
+
+  it('recognises a published archive by its path, or by the version in its composer.json', async () => {
+    sut.setPublishedVersions([published('magento/module-a', '1.0.0'), {name: 'magento/module-b', version: '2.0.0', path: 'magento/module-b-2.0.0.zip'}]);
+    fs.readFileSync.mockReturnValue(Buffer.from('zip'));
+    const composerOf = composer => ({file: jest.fn(() => ({async: jest.fn().mockResolvedValue(JSON.stringify(composer))}))});
+
+    expect(await sut.isPublishedArchive('magento/module-a-1.0.0.zip', '/a.zip')).toBe(true);
+    expect(JSZip.loadAsync).not.toHaveBeenCalled();
+
+    JSZip.loadAsync = jest.fn().mockResolvedValue(composerOf({name: 'magento/module-b', version: '2.0.0'}));
+    expect(await sut.isPublishedArchive('additional/magento-module-b-2.0.0.0.zip', '/b.zip')).toBe(true);
+
+    JSZip.loadAsync = jest.fn().mockResolvedValue(composerOf({name: 'magento/module-b', version: '2.0.1'}));
+    expect(await sut.isPublishedArchive('additional/magento-module-b-2.0.1.0.zip', '/b.zip')).toBe(false);
+  });
+});

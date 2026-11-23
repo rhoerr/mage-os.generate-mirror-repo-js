@@ -11,7 +11,9 @@ const {
   validateVersionString,
 } = require('./../release-build-tools');
 const packageModules = require("../package-modules");
-const {setArchiveBaseDir} = packageModules;
+const {setArchiveBaseDir, setPublishedVersions} = packageModules;
+const {readLedger} = require('../package-ledger');
+const {createRefRecorder, readRefs} = require('../ref-ledger');
 const {generateAliasesFromBuiltPackages} = require("../package-aliases");
 const {buildConfig: releaseInstructions} = require('./../build-config/mageos-release-build-config');
 const {processMirrorInstruction} = require("../mirror-build-tools");
@@ -19,7 +21,7 @@ const {fetchPackagistList} = require('../packagist');
 const buildState = require('../type/build-state');
 
 const options = parseOptions(
-  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $releaseRefsFile $upstreamRelease @skipHistory @skipAliases @help|h`,
+  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $releaseRefsFile $upstreamRelease $ledger $refs $refsOut @fullRebuild @skipHistory @skipAliases @help|h`,
   process.argv
 );
 
@@ -43,6 +45,10 @@ Options:
   --upstreamRelease= Upstream Magento Open Source release to use for package compatibility
   --skipHistory      Skip rebuilding of historic releases
   --skipAliases      Skip building package magento/* aliases to mage-os/* packages
+  --ledger=          Package ledger; versions in it are not built again
+  --refs=            Ref ledger; recorded tags are not read again, and fail the build if they moved
+  --refsOut=         File to write the tags this build processed to, for the ref ledger
+  --fullRebuild      Build every version and tag, even those in --ledger and --refs
 `);
   process.exit(1);
 }
@@ -69,6 +75,17 @@ if (upstreamRelease && ! mageosRelease) {
 
 const {refs: releaseRefs, pins: dependencyPins} = loadReleaseRefs(releaseRefsFile);
 
+if (options.ledger && !options.fullRebuild) {
+  setPublishedVersions(readLedger(options.ledger));
+}
+
+const refRecorder = (options.refs || options.refsOut) && createRefRecorder({
+  rows: options.refs ? readRefs(options.refs) : [],
+  skip: !options.fullRebuild,
+  listRemoteTags: repo.listRemoteTags,
+  pendingFile: options.refsOut || null,
+});
+
 let distroRelease = new buildState({
   version: mageosRelease,
   composerRepoUrl: mageosRepoUrl,
@@ -87,7 +104,7 @@ let distroRelease = new buildState({
       for (const instruction of releaseInstructions) {
         instruction.vendor = mageosVendor;
 
-        await processMirrorInstruction(instruction, distroRelease);
+        await processMirrorInstruction(instruction, distroRelease, refRecorder);
       }
     }
 

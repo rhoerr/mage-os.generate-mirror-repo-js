@@ -79,6 +79,62 @@ describe('bin/package-ledger.js', () => {
     });
   });
 
+  describe('verify --update with --pendingRefs', () => {
+    const refs = require('../../src/ref-ledger');
+    const name = 'mage-os/product-community-edition';
+    const commit = 'a'.repeat(40);
+    const fingerprint = 'f'.repeat(64);
+    let refsFile;
+    let pendingFile;
+
+    beforeEach(() => {
+      const build = path.join(dir, 'build');
+      fs.mkdirSync(path.join(build, 'p2', 'mage-os'), {recursive: true});
+      fs.mkdirSync(path.join(build, 'packages', 'mage-os'), {recursive: true});
+      fs.writeFileSync(path.join(build, 'packages.json'), JSON.stringify({'available-packages': [name]}));
+      fs.writeFileSync(path.join(build, 'p2', `${name}.json`), JSON.stringify({packages: {[name]: ['2.0.0', '2.1.0'].map(version => ({
+        name,
+        version,
+        version_normalized: `${version}.0`,
+        dist: {type: 'zip', url: `${REPO_URL}packages/${name}-${version}.zip`, shasum: sha1(version === '2.0.0' ? 'published' : 'new')},
+        'published-time': version === '2.0.0' ? TIME : ledger.formatTime(new Date()),
+      }))}}));
+      fs.writeFileSync(path.join(build, 'packages', `${name}-2.0.0.zip`), 'published');
+      fs.writeFileSync(path.join(build, 'packages', `${name}-2.1.0.zip`), 'new');
+      refsFile = path.join(dir, 'refs.tsv');
+      pendingFile = path.join(dir, 'pending.json');
+      refs.writeRefs(refsFile, []);
+    });
+
+    const pending = (tag, versions, overrides = {}) => ({instruction: 'magento2', tag, commit, fingerprint, versions, ...overrides});
+    const verify = () => run('verify', '--satisOutputDir=build', `--repoUrl=${REPO_URL}`, '--update', `--refs=${refsFile}`, `--pendingRefs=${pendingFile}`);
+
+    it('records the tags whose versions are all in the updated ledger', () => {
+      fs.writeFileSync(pendingFile, JSON.stringify([
+        pending('2.1.0', [[name, '2.1.0']]),
+        pending('2.2.0', [[name, '2.2.0']]),
+      ]));
+      const result = verify();
+      expect(result.status).toBe(0);
+      expect(refs.readRefs(refsFile).map(row => row.tag)).toEqual(['2.1.0']);
+      expect(ledger.readLedger(ledgerFile).map(row => row.version)).toEqual(['2.0.0', '2.1.0']);
+    });
+
+    it('changes neither ledger when a recorded tag moved', () => {
+      refs.writeRefs(refsFile, [{instruction: 'magento2', tag: '2.0.0', commit, fingerprint}]);
+      fs.writeFileSync(pendingFile, JSON.stringify([pending('2.0.0', [[name, '2.0.0']], {commit: 'b'.repeat(40)})]));
+      const before = fs.readFileSync(ledgerFile, 'utf8');
+      expect(verify().status).toBe(2);
+      expect(fs.readFileSync(ledgerFile, 'utf8')).toBe(before);
+      expect(refs.readRefs(refsFile)[0].commit).toBe(commit);
+    });
+
+    it('requires --update and --refs', () => {
+      fs.writeFileSync(pendingFile, '[]');
+      expect(run('verify', '--satisOutputDir=build', `--repoUrl=${REPO_URL}`, `--pendingRefs=${pendingFile}`).status).toBe(2);
+    });
+  });
+
   describe('guard', () => {
     it.each([
       [['--target=production', '--mageosRelease=2.1.0', '--publishTag=true'], 0],

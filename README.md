@@ -206,6 +206,24 @@ node bin/package-ledger.js audit --ledger=resource/ledger/mirror.tsv --repoUrl=h
 This checks the version list, the sha1 checksums and the download URLs. Add `--checkTimes` to also check the
 metadata files composer 2 reads, including each `published-time`.
 
+### Ref ledger
+
+`resource/ledger/mirror-refs.tsv` and `resource/ledger/release-refs.tsv` record the git tags the packages were built
+from: the build instruction, the tag, the commit it pointed at, and a fingerprint of the instruction's configuration.
+A deploy that passed the gate records the tags it processed if every version they produced is in the ledger. The
+`record ledger` job commits both files.
+
+The generators take these options for it:
+
+- `--ledger=FILE` does not build the versions in the package ledger again.
+- `--refs=FILE` does not read the recorded tags again. A recorded tag that moved or was deleted fails the build.
+  When the configuration of an instruction changes, all its tags are processed again.
+- `--refsOut=FILE` writes the tags the build processed, for `package-ledger.js verify --update --refs --pendingRefs`.
+- `--fullRebuild` builds every version and tag; the recorded commits are still checked.
+
+A tag is recorded even if a package of it failed in a way that repeats on the same commit, a missing composer.json
+for example. After fixing the generator for such a case, run a full rebuild to build those packages.
+
 ## Process of building a new mirror release
 
 A new mirror release gets created when Magento releases a new version.  

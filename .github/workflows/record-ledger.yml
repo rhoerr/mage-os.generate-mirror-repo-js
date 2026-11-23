@@ -17,6 +17,7 @@ on:
 env:
   ledger: ${{ inputs.ledger }}
   ledger_file: resource/ledger/${{ inputs.ledger }}.tsv
+  refs_file: resource/ledger/${{ inputs.ledger }}-refs.tsv
   artifact: package-ledger-${{ inputs.ledger }}-${{ github.run_attempt }}
 
 jobs:
@@ -56,11 +57,12 @@ jobs:
         run: |
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir "$RUNNER_TEMP/ledger"
           cp "$RUNNER_TEMP/ledger/$ledger.tsv" "$ledger_file"
+          cp "$RUNNER_TEMP/ledger/$ledger-refs.tsv" "$refs_file"
       - name: "Commit and push the ledger"
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git add "$ledger_file"
+          git add "$ledger_file" "$refs_file"
           if git diff --cached --quiet; then
             echo "The package ledger is unchanged"
             exit 0

@@ -8,9 +8,10 @@ const fs = require('fs');
 const path = require('path');
 const parseOptions = require('parse-options');
 const ledger = require('../src/package-ledger');
+const refLedger = require('../src/ref-ledger');
 
 const options = parseOptions(
-  `command $ledger $satisOutputDir $packagesDir $repoUrl $mode $expectDiff $times $defaultTime $target $mageosRelease $publishTag @allowAliasRepoint @update @checkTimes @help|h`,
+  `command $ledger $satisOutputDir $packagesDir $repoUrl $mode $expectDiff $times $defaultTime $target $mageosRelease $publishTag $refs $pendingRefs @allowAliasRepoint @update @checkTimes @help|h`,
   process.argv
 );
 
@@ -39,6 +40,10 @@ Options:
   --allowAliasRepoint  verify: Accept changed magento/* alias metapackages that require the highest mage-os/* version
                        replacing them in this build
   --update             verify: Write new and changed versions to the ledger if the gate passed
+  --refs=              verify: The ref ledger to add the tags in --pendingRefs to on --update,
+                       for example resource/ledger/mirror-refs.tsv
+  --pendingRefs=       verify: The tags the generator processed (its --refsOut file). Only tags all of whose
+                       versions are in the updated ledger are recorded
   --checkTimes         audit: Also check the p2 metadata composer 2 reads, including the published-time of
                        every version (one request per package)
   --target=            guard: "production" or "preview"
@@ -106,6 +111,9 @@ async function verify() {
   if (options.update && mode !== 'gate') {
     throw new Error('--update requires --mode=gate');
   }
+  if (options.pendingRefs && !(options.update && options.refs)) {
+    throw new Error('--pendingRefs requires --update and --refs');
+  }
   const satisOutputDir = options.satisOutputDir || 'build';
   const results = await ledger.verifyBuild(ledger.readLedger(options.ledger), {
     satisOutputDir,
@@ -121,7 +129,15 @@ async function verify() {
     return fail(failures);
   }
   if (options.update) {
-    ledger.writeLedger(options.ledger, ledger.nextRows(results));
+    const rows = ledger.nextRows(results);
+    if (options.pendingRefs) {
+      const pending = JSON.parse(fs.readFileSync(options.pendingRefs, 'utf8'));
+      const merged = refLedger.mergeRefs(refLedger.readRefs(options.refs), pending, rows);
+      refLedger.writeRefs(options.refs, merged.rows);
+      console.log(`Recorded ${merged.recorded} tags in ${options.refs}`);
+      merged.notPublished.forEach(ref => console.log(`Not recorded, it built versions that are not in the ledger: ${ref}`));
+    }
+    ledger.writeLedger(options.ledger, rows);
     console.log(`Updated ${options.ledger}`);
   }
 }
