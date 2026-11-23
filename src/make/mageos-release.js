@@ -12,7 +12,7 @@ const {
 } = require('./../release-build-tools');
 const packageModules = require("../package-modules");
 const {setArchiveBaseDir, setPublishedVersions} = packageModules;
-const {readLedger} = require('../package-ledger');
+const {readIncludedVersions, readLedger} = require('../package-ledger');
 const {createRefRecorder, readRefs} = require('../ref-ledger');
 const {generateAliasesFromBuiltPackages} = require("../package-aliases");
 const {buildConfig: releaseInstructions} = require('./../build-config/mageos-release-build-config');
@@ -21,7 +21,7 @@ const {fetchPackagistList} = require('../packagist');
 const buildState = require('../type/build-state');
 
 const options = parseOptions(
-  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $releaseRefsFile $upstreamRelease $ledger $refs $refsOut @fullRebuild @skipHistory @skipAliases @help|h`,
+  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $releaseRefsFile $upstreamRelease $ledger $refs $refsOut $baseMetadata @fullRebuild @skipHistory @skipAliases @help|h`,
   process.argv
 );
 
@@ -48,6 +48,8 @@ Options:
   --ledger=          Package ledger; versions in it are not built again
   --refs=            Ref ledger; recorded tags are not read again, and fail the build if they moved
   --refsOut=         File to write the tags this build processed to, for the ref ledger
+  --baseMetadata=    Satis output dir with the packages.json and include files of the live repository;
+                     with --ledger, the aliases are generated from these and the new packages
   --fullRebuild      Build every version and tag, even those in --ledger and --refs
 `);
   process.exit(1);
@@ -76,8 +78,14 @@ if (upstreamRelease && ! mageosRelease) {
 const {refs: releaseRefs, pins: dependencyPins} = loadReleaseRefs(releaseRefsFile);
 
 if (options.ledger && !options.fullRebuild) {
+  if (!skipAliases && !options.baseMetadata) {
+    throw new Error('--ledger skips published packages the aliases are generated from, it needs --baseMetadata or --skipAliases');
+  }
   setPublishedVersions(readLedger(options.ledger));
 }
+const baseVersions = options.ledger && !options.fullRebuild && !skipAliases
+  ? readIncludedVersions(options.baseMetadata)
+  : null;
 
 const refRecorder = (options.refs || options.refsOut) && createRefRecorder({
   rows: options.refs ? readRefs(options.refs) : [],
@@ -143,7 +151,7 @@ let distroRelease = new buildState({
     if (! skipAliases) {
       // Generate magento/* alias packages by scanning all built mage-os packages
       console.log(`\nGenerating magento/* alias packages...`);
-      const aliasPackages = await generateAliasesFromBuiltPackages(archiveDir, packageModules);
+      const aliasPackages = await generateAliasesFromBuiltPackages(archiveDir, packageModules, baseVersions);
       console.log(`Alias generation complete. Created ${Object.keys(aliasPackages).length} alias packages.\n`);
     }
   } catch (exception) {

@@ -149,4 +149,63 @@ describe('bin/package-ledger.js', () => {
       expect(run('guard', ...args).status).toBe(status);
     });
   });
+
+  describe('base', () => {
+    const http = require('http');
+    const {execFile} = require('child_process');
+    const name = 'mage-os/product-community-edition';
+    let server;
+    let baseUrl;
+    let served;
+
+    beforeEach(async () => {
+      const version = {
+        name,
+        version: '2.0.0',
+        version_normalized: '2.0.0.0',
+        dist: {type: 'zip', url: `${REPO_URL}packages/${name}-2.0.0.zip`, shasum: sha1('published')},
+        'published-time': TIME,
+      };
+      served = {
+        '/packages.json': JSON.stringify({includes: {'include/all$abc.json': {sha1: 'abc'}}}),
+        '/include/all$abc.json': JSON.stringify({packages: {[name]: {'2.0.0': version}}}),
+      };
+      server = http.createServer((request, response) => {
+        const file = decodeURIComponent(request.url.split('?')[0]);
+        response.writeHead(file in served ? 200 : 404);
+        response.end(served[file] || '');
+      });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+      baseUrl = `http://127.0.0.1:${server.address().port}/`;
+    });
+
+    afterEach(async () => {
+      await new Promise(resolve => server.close(resolve));
+    });
+
+    const base = () => new Promise(resolve => execFile(
+      process.execPath,
+      [CLI, 'base', `--ledger=${ledgerFile}`, `--repoUrl=${REPO_URL}`, `--baseUrl=${baseUrl}`, '--satisOutputDir=build'],
+      {cwd: dir, encoding: 'utf8'},
+      (error, stdout) => resolve({status: error ? error.code : 0, stdout})
+    ));
+
+    it('writes the live metadata that matches the ledger to the satis output dir', async () => {
+      const result = await base();
+      expect(result.status).toBe(0);
+      expect(fs.readFileSync(path.join(dir, 'build', 'include', 'all$abc.json'), 'utf8')).toBe(served['/include/all$abc.json']);
+      expect(fs.readFileSync(path.join(dir, 'build', 'packages.json'), 'utf8')).toBe(served['/packages.json']);
+    });
+
+    it.each([
+      ['a stale copy', () => served['/include/all$abc.json'] = JSON.stringify({packages: {}})],
+      ['a missing include file', () => delete served['/include/all$abc.json']],
+    ])('fails on %s and points at full_rebuild', async (_, change) => {
+      change();
+      const result = await base();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('Deploy with full_rebuild');
+      expect(fs.existsSync(path.join(dir, 'build'))).toBe(false);
+    });
+  });
 });

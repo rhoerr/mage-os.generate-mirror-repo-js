@@ -857,4 +857,175 @@ describe('package-ledger', () => {
       expect(report).toContain('… and 1 more');
     });
   });
+  describe('base metadata', () => {
+    const TIME = '2024-05-01T10:00:00+00:00';
+    const ledgerRows = [row(), row({version: '1.1.0'})];
+    const metadataOf = (ledgerRow, extra = {}) => ({
+      name: ledgerRow.name,
+      version: ledgerRow.version,
+      version_normalized: ledgerRow.version_normalized,
+      dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRow.path}`, shasum: ledgerRow.sha1},
+      'published-time': ledgerRow['published-time'],
+      ...extra,
+    });
+    const filesOf = versions => [
+      {file: 'packages.json', text: JSON.stringify({includes: {'include/all$abc.json': {sha1: 'abc'}}})},
+      {file: 'include/all$abc.json', text: JSON.stringify({packages: {'acme/alpha': Object.fromEntries(versions.map(v => [v.version, v]))}})},
+    ];
+    const failuresOf = versions => sut.baseMetadataFailures(ledgerRows, filesOf(versions), REPO_URL).failures;
+
+    it('accepts metadata with exactly the ledger versions', () => {
+      expect(failuresOf(ledgerRows.map(r => metadataOf(r)))).toEqual([]);
+    });
+
+    it('fails on a changed require', () => {
+      expect(failuresOf([metadataOf(ledgerRows[0], {require: {'acme/evil': '*'}}), metadataOf(ledgerRows[1])]))
+        .toEqual(['1 version(s) with a published-time or shasum problem']);
+    });
+
+    it('fails on a stale copy without a ledger version', () => {
+      expect(failuresOf([metadataOf(ledgerRows[0])])).toEqual(['1 already published version(s) missing from the build']);
+    });
+
+    it('fails on a version the ledger does not have', () => {
+      const unknown = row({version: '6.6.6'});
+      expect(failuresOf([...ledgerRows.map(r => metadataOf(r)), metadataOf(unknown, {'published-time': sut.formatTime(new Date())})]))
+        .toEqual(['1 version(s) that are not in the ledger']);
+    });
+
+    it('fails on a changed archive or published-time', () => {
+      expect(failuresOf([metadataOf(ledgerRows[0], {dist: {url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: sha1('x')}}), metadataOf(ledgerRows[1])]))
+        .toEqual(['1 already published version(s) modified']);
+      expect(failuresOf([metadataOf(ledgerRows[0], {'published-time': '2025-01-01T00:00:00+00:00'}), metadataOf(ledgerRows[1])]))
+        .toEqual(['1 version(s) with a published-time or shasum problem']);
+    });
+
+    it('fails on metadata satis generated without published-time', () => {
+      const withoutTime = ledgerRows.map(r => {
+        const {'published-time': _, ...version} = metadataOf(r);
+        return version;
+      });
+      expect(failuresOf(withoutTime)).toEqual(['2 version(s) with a published-time or shasum problem']);
+    });
+
+    it('fetches packages.json and its include files past any cache', async () => {
+      const files = filesOf(ledgerRows.map(r => metadataOf(r)));
+      const fetchText = jest.fn(async url => {
+        const file = url.replace('http://127.0.0.1:1/', '').replace(/\?nocache=\d+$/, '');
+        return files.find(f => f.file === file).text;
+      });
+
+      expect(await sut.fetchBaseMetadata('http://127.0.0.1:1', fetchText)).toEqual(files);
+      expect(fetchText.mock.calls.map(([url]) => url)).toEqual([
+        expect.stringMatching(/^http:\/\/127\.0\.0\.1:1\/packages\.json\?nocache=\d+$/),
+        expect.stringMatching(/^http:\/\/127\.0\.0\.1:1\/include\/all\$abc\.json\?nocache=\d+$/),
+      ]);
+    });
+
+    it('does not fetch an include file outside of the repository', async () => {
+      const fetchText = async () => JSON.stringify({includes: {'../all.json': {}}});
+      await expect(sut.fetchBaseMetadata('http://127.0.0.1:1/', fetchText)).rejects.toThrow(/outside/);
+    });
+
+    it('writes the fetched files where satis reads its previous build from', () => {
+      const files = filesOf(ledgerRows.map(r => metadataOf(r)));
+      sut.writeBaseMetadata(files, dir);
+
+      expect(fs.readFileSync(path.join(dir, 'include/all$abc.json'), 'utf8')).toBe(files[1].text);
+      expect(sut.readIncludedVersions(dir).map(v => v.version)).toEqual(['1.0.0', '1.1.0']);
+      expect(() => sut.writeBaseMetadata(files, dir)).toThrow(/already exists/);
+    });
+
+    it('rejects a version without dist, which is what a seed satis did not replace looks like', () => {
+      const files = filesOf([{name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', 'published-time': TIME}]);
+      expect(() => sut.baseMetadataFailures(ledgerRows, files, REPO_URL))
+        .toThrow(/no dist/);
+    });
+  });
+
+  describe('incremental verifyBuild', () => {
+    const TIME = '2024-05-01T10:00:00+00:00';
+
+    function writeJson(file, data) {
+      fs.mkdirSync(path.dirname(path.join(dir, file)), {recursive: true});
+      fs.writeFileSync(path.join(dir, file), JSON.stringify(data));
+    }
+
+    async function zipOf(composer) {
+      const zip = new JSZip();
+      zip.file('composer.json', JSON.stringify(composer));
+      return zip.generateAsync({type: 'nodebuffer'});
+    }
+
+    // versions: {name, version, content|null, time, extra}; null content means no archive in the build
+    function writeBuild(versions) {
+      const names = [...new Set(versions.map(v => v.name))];
+      writeJson('packages.json', {'available-packages': names});
+      for (const name of names) {
+        writeJson(`p2/${name}.json`, {packages: {[name]: versions.filter(v => v.name === name).map(v => ({
+          name,
+          version: v.version,
+          version_normalized: `${v.version}.0`,
+          dist: {type: 'zip', url: `${REPO_URL}packages/${name}-${v.version}.zip`, shasum: v.shasum || sha1(v.content)},
+          'published-time': v.time || TIME,
+          ...(v.extra || {}),
+        }))}});
+      }
+      for (const v of versions.filter(v => v.content !== null)) {
+        fs.mkdirSync(path.join(dir, 'packages', path.dirname(v.name)), {recursive: true});
+        fs.writeFileSync(path.join(dir, 'packages', `${v.name}-${v.version}.zip`), v.content);
+      }
+    }
+
+    const options = extra => ({satisOutputDir: dir, packagesDir: path.join(dir, 'packages'), repoUrl: REPO_URL, ...extra});
+
+    it('checks versions without an archive by their metadata', async () => {
+      const published = row();
+      const stamped = sut.formatTime(new Date());
+      writeBuild([
+        {name: 'acme/alpha', version: '1.0.0', content: null, shasum: published.sha1},
+        {name: 'acme/alpha', version: '2.0.0', content: 'alpha 2.0.0', time: stamped},
+      ]);
+
+      await expect(sut.verifyBuild([published], options())).rejects.toThrow(/ENOENT/);
+      const results = await sut.verifyBuild([published], options({incremental: true}));
+
+      expect(statusOf(results, 'acme/alpha', '1.0.0')).toBe(STATUS.UNCHANGED);
+      expect(statusOf(results, 'acme/alpha', '2.0.0')).toBe(STATUS.NEW);
+      expect(sut.gateFailures(results)).toEqual([]);
+      expect(sut.nextRows(results).map(r => [r.version, r.sha256])).toEqual([['1.0.0', ''], ['2.0.0', sha256('alpha 2.0.0')]]);
+    });
+
+    it('fails a version without an archive that is not an unchanged published version', async () => {
+      const published = row();
+      writeBuild([
+        {name: 'acme/alpha', version: '1.0.0', content: null, shasum: published.sha1, extra: {require: {'acme/evil': '*'}}},
+        {name: 'acme/alpha', version: '2.0.0', content: null, shasum: sha1('x'), time: sut.formatTime(new Date())},
+      ]);
+
+      const results = await sut.verifyBuild([published], options({incremental: true}));
+
+      expect(results.find(r => r.entry.version === '1.0.0').problems).toEqual([expect.stringMatching(/^metadata-sha256/)]);
+      expect(results.find(r => r.entry.version === '2.0.0').problems).toEqual(['new version has no archive in the build']);
+    });
+
+    it('accepts an alias repointed at a version replacing it that is only in the metadata', async () => {
+      const aliasOld = await zipOf({name: 'magento/module-a', type: 'metapackage', version: '100.0.1', require: {'mage-os/module-a': '1.0.0'}});
+      const aliasNew = await zipOf({name: 'magento/module-a', type: 'metapackage', version: '100.0.1', require: {'mage-os/module-a': '2.0.0'}});
+      const rows = [
+        row({name: 'magento/module-a', version: '100.0.1', sha1: sha1(aliasOld)}),
+        row({name: 'mage-os/module-a', version: '2.0.0'}),
+      ];
+      writeBuild([
+        {name: 'mage-os/module-a', version: '2.0.0', content: null, shasum: rows[1].sha1, extra: {replace: {'magento/module-a': '100.0.1'}}},
+        {name: 'magento/module-a', version: '100.0.1', content: aliasNew},
+      ]);
+      rows[1]['metadata-sha256'] = sut.metadataSha256({name: 'mage-os/module-a', version: '2.0.0', replace: {'magento/module-a': '100.0.1'}});
+
+      const results = await sut.verifyBuild(rows, options({incremental: true, allowAliasRepoint: true}));
+
+      expect(statusOf(results, 'magento/module-a', '100.0.1')).toBe(STATUS.REPOINTED);
+      expect(sut.gateFailures(results)).toEqual([]);
+    });
+  });
 });

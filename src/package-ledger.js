@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const JSZip = require('jszip');
-const {newestReplacers, readComposerJsonFromZip} = require('./package-aliases');
+const {aliasTarget, newestReplacers, readComposerJsonFromZip} = require('./package-aliases');
 
 const FIELDS = ['name', 'version', 'version_normalized', 'path', 'sha1', 'sha256', 'metadata-sha256', 'published-time', 'source'];
 const SOURCES = ['upstream', 'tag', 'release', 'bootstrap', 'build'];
@@ -227,7 +227,10 @@ function metadataEntries(data, packageName, repoUrl) {
   const versions = (data.packages || {})[packageName] || [];
   const prefix = trailingSlash(repoUrl) + 'packages/';
   return (Array.isArray(versions) ? versions : Object.values(versions)).map(version => {
-    const url = (version.dist || {}).url || '';
+    if (!version.dist) {
+      throw new Error(`${packageName} ${version.version}: no dist, the metadata is a seed satis did not replace`);
+    }
+    const url = version.dist.url || '';
     if (!url.startsWith(prefix)) {
       throw new Error(`${packageName} ${version.version}: dist url "${url}" is not below ${prefix}`);
     }
@@ -239,6 +242,7 @@ function metadataEntries(data, packageName, repoUrl) {
       shasum: version.dist.shasum || '',
       publishedTime: version['published-time'] || '',
       metadataSha256: metadataSha256(version),
+      ...(version.replace ? {replace: version.replace} : {}),
     };
   });
 }
@@ -294,11 +298,14 @@ async function mapConcurrent(items, limit, fn) {
   return results;
 }
 
-async function hashBuiltEntries(entries, packagesDir) {
-  return mapConcurrent(entries, 8, async entry => ({
-    ...entry,
-    ...(await hashFile(path.join(packagesDir, entry.path))),
-  }));
+async function hashBuiltEntries(entries, packagesDir, incremental) {
+  return mapConcurrent(entries, 8, async entry => {
+    const file = path.join(packagesDir, entry.path);
+    if (incremental && !fs.existsSync(file)) {
+      return {...entry, sha1: entry.shasum, sha256: '', built: false};
+    }
+    return {...entry, ...(await hashFile(file))};
+  });
 }
 
 /**
@@ -311,31 +318,11 @@ async function readAliasTarget(zipFile) {
   if (files.length !== 1 || files[0].name !== 'composer.json') {
     return null;
   }
-  let composer;
   try {
-    composer = JSON.parse(await files[0].async('string'));
+    return aliasTarget(JSON.parse(await files[0].async('string')));
   } catch (exception) {
     return null;
   }
-  const allowedKeys = ['name', 'description', 'type', 'version', 'require'];
-  if (!composer || typeof composer !== 'object' || Object.keys(composer).some(key => !allowedKeys.includes(key))) {
-    return null;
-  }
-  const requires = Object.entries(composer.require || {});
-  if (
-    typeof composer.name !== 'string'
-    || !composer.name.startsWith('magento/')
-    || composer.type !== 'metapackage'
-    || requires.length !== 1
-    || typeof requires[0][1] !== 'string'
-  ) {
-    return null;
-  }
-  return {
-    name: composer.name,
-    version: composer.version,
-    target: {name: requires[0][0], version: requires[0][1]},
-  };
 }
 
 /**
@@ -344,16 +331,19 @@ async function readAliasTarget(zipFile) {
  * With allowAliasRepoint, a changed magento/* alias metapackage is accepted if all it does is
  * require the highest mage-os/* version replacing it in this build, which is the version the
  * release build points the alias at. Every release legitimately changes the aliases it supersedes.
+ *
+ * With incremental, versions without an archive in packagesDir are checked by their metadata only, and
+ * fail unless they are unchanged published versions.
  */
-async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDiff = [], allowAliasRepoint = false, now = new Date()}) {
-  const entries = await hashBuiltEntries(readSatisOutput(satisOutputDir, repoUrl), packagesDir);
-  const results = classify(rows, entries, {expectDiff, now});
+async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDiff = [], allowAliasRepoint = false, incremental = false, now = new Date()}) {
+  const entries = await hashBuiltEntries(readSatisOutput(satisOutputDir, repoUrl), packagesDir, incremental);
+  const results = notBuiltProblems(classify(rows, entries, {expectDiff, now}));
   if (!allowAliasRepoint) {
     return results;
   }
   const aliasTargets = new Map();
   for (const {status, entry} of results) {
-    if (status === STATUS.MODIFIED) {
+    if (status === STATUS.MODIFIED && entry.built !== false) {
       const alias = await readAliasTarget(path.join(packagesDir, entry.path));
       alias && aliasTargets.set(rowKey(entry), alias);
     }
@@ -364,9 +354,88 @@ async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDi
   const composers = await mapConcurrent(
     entries.filter(entry => entry.path.startsWith('mage-os/')),
     8,
-    entry => readComposerJsonFromZip(path.join(packagesDir, entry.path))
+    entry => entry.built === false ? entry : readComposerJsonFromZip(path.join(packagesDir, entry.path))
   );
-  return classify(rows, entries, {expectDiff, aliasTargets, replacers: newestReplacers(composers), now});
+  return notBuiltProblems(classify(rows, entries, {expectDiff, aliasTargets, replacers: newestReplacers(composers), now}));
+}
+
+function notBuiltProblems(results) {
+  for (const {status, problems, entry} of results) {
+    if (entry && entry.built === false && status !== STATUS.UNCHANGED) {
+      problems.push(`${status} version has no archive in the build`);
+    }
+  }
+  return results;
+}
+
+/**
+ * Every package version in the include files of the packages.json in a satis output dir.
+ */
+function readIncludedVersions(satisOutputDir) {
+  const packages = JSON.parse(fs.readFileSync(path.join(satisOutputDir, 'packages.json'), 'utf8'));
+  return Object.keys(packages.includes || {}).flatMap(include => {
+    const data = JSON.parse(fs.readFileSync(path.join(satisOutputDir, include), 'utf8'));
+    return Object.values(data.packages || {}).flatMap(versions => Object.values(versions));
+  });
+}
+
+/**
+ * Fetch the packages.json and include files a live repository serves, to base an incremental build on.
+ * Check them with baseMetadataFailures() before using them.
+ *
+ * @param {String} baseUrl Where to fetch from, normally the repository URL
+ * @param {function(String): Promise<String>} fetchText
+ * @returns {Promise<Array<{file: String, text: String}>>} packages.json first
+ */
+async function fetchBaseMetadata(baseUrl, fetchText) {
+  const base = trailingSlash(baseUrl);
+  // Without the query, a CDN may serve a packages.json naming an include file that is no longer the current one
+  const noCache = `?nocache=${Date.now()}`;
+  const packagesText = await fetchText(base + 'packages.json' + noCache);
+  const files = [{file: 'packages.json', text: packagesText}];
+  for (const include of Object.keys(JSON.parse(packagesText).includes || {})) {
+    if (include.split('/').includes('..') || path.isAbsolute(include)) {
+      throw new Error(`Include file outside of the repository: ${include}`);
+    }
+    files.push({file: include, text: await fetchText(base + include + noCache)});
+  }
+  return files;
+}
+
+/**
+ * Reasons fetched base metadata can not be used: unless every ledger version is in it, as recorded,
+ * and nothing else, satis would publish a version differently or drop it.
+ *
+ * @param {Array<Object>} rows Ledger rows
+ * @param {Array<{file: String, text: String}>} files Result of fetchBaseMetadata()
+ * @param {String} repoUrl The repository URL the dist urls are below
+ */
+function baseMetadataFailures(rows, files, repoUrl) {
+  const entries = [];
+  for (const {text} of files.slice(1)) {
+    const data = JSON.parse(text);
+    for (const name of Object.keys(data.packages || {})) {
+      entries.push(...metadataEntries(data, name, repoUrl).map(({shasum, ...entry}) => ({...entry, sha1: shasum})));
+    }
+  }
+  const results = classify(rows, entries);
+  const failures = gateFailures(results);
+  const {new: unknown} = summarize(results);
+  if (unknown > 0) {
+    failures.push(`${unknown} version(s) that are not in the ledger`);
+  }
+  return {results, failures};
+}
+
+function writeBaseMetadata(files, satisOutputDir) {
+  if (fs.existsSync(path.join(satisOutputDir, 'packages.json'))) {
+    throw new Error(`Refusing to write the base metadata: ${satisOutputDir}/packages.json already exists`);
+  }
+  for (const {file, text} of files) {
+    const target = path.join(satisOutputDir, file);
+    fs.mkdirSync(path.dirname(target), {recursive: true});
+    fs.writeFileSync(target, text);
+  }
 }
 
 function globToRegExp(glob) {
@@ -697,9 +766,11 @@ function parseTimes(text) {
 module.exports = {
   FIELDS,
   STATUS,
+  baseMetadataFailures,
   bootstrapRows,
   buildSeeds,
   classify,
+  fetchBaseMetadata,
   fetchRepoEntries,
   formatLedger,
   formatReport,
@@ -711,11 +782,13 @@ module.exports = {
   parseLedger,
   parseTimes,
   readAliasTarget,
+  readIncludedVersions,
   readLedger,
   readSatisOutput,
   rowKey,
   summarize,
   verifyBuild,
+  writeBaseMetadata,
   writeLedger,
   writeSeeds,
 };
