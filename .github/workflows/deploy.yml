@@ -91,10 +91,7 @@ env:
   ledger_file: ${{ inputs.ledger != '' && format('resource/ledger/{0}.tsv', inputs.ledger) || '' }}
   refs_file: ${{ inputs.ledger != '' && format('resource/ledger/{0}-refs.tsv', inputs.ledger) || '' }}
   incremental: ${{ inputs.ledger != '' && inputs.enforce_ledger && !inputs.full_rebuild }}
-  refs_out_arg: ${{ inputs.ledger != '' && '--refsOut="$RUNNER_TEMP/refs-pending.json"' || '' }}
-  # A recorded tag that moved fails every build, an incremental one also skips what the ledger has
-  generate_ledger_arg: ${{ (inputs.ledger != '' && inputs.enforce_ledger && !inputs.full_rebuild) && '--ledger="$ledger_file" --refs="$refs_file"' || (inputs.ledger != '' && '--refs="$refs_file" --fullRebuild' || '') }}
-  base_metadata_arg: ${{ (inputs.ledger == 'release' && inputs.enforce_ledger && !inputs.full_rebuild) && '--baseMetadata=build' || '' }}
+  refs_out_arg: ${{ inputs.ledger != '' && inputs.enforce_ledger && '--refsOut="$RUNNER_TEMP/refs-pending.json"' || '' }}
   ledger_mode_arg: ${{ inputs.enforce_ledger && '--mode=gate --update --refs="$refs_file" --pendingRefs="$RUNNER_TEMP/refs-pending.json"' || '--mode=report --expectDiff="*/project-community-edition-*,*/project-minimal-edition-*"' }}
   ledger_alias_repoint_arg: ${{ inputs.ledger == 'release' && '--allowAliasRepoint' || '' }}
 
@@ -136,6 +133,10 @@ jobs:
             ${{ env.mageos_release_arg }} ${{ env.upstream_release_arg }} ${{ env.release_refs_file_arg }} ${{ env.refs_out_arg }} \
             ${{ env.generate_ledger_arg }} ${{ env.base_metadata_arg }}
         name: "Generate the packages for the composer repo"
+        env:
+          # A recorded tag that moved fails every build, an incremental one also skips what the ledger has
+          generate_ledger_arg: ${{ env.incremental == 'true' && '--ledger="$ledger_file" --refs="$refs_file"' || (inputs.ledger != '' && '--refs="$refs_file" --fullRebuild' || '') }}
+          base_metadata_arg: ${{ env.incremental == 'true' && inputs.ledger == 'release' && '--baseMetadata=build' || '' }}
 
       # Composer create-project and composer require have limited support for commit hashes, they check composer-plugin-api constraints
       # of the specified branch HEAD instead of the specified commit hash.
