@@ -1,9 +1,7 @@
 const repo = require('./../repository');
 const parseOptions = require('parse-options');
-const {setArchiveBaseDir, setPublishedVersions} = require('./../package-modules');
-const {readLedger} = require('./../package-ledger');
-const {createRefRecorder, readRefs} = require('./../ref-ledger');
-const {copyAdditionalPackages, processMirrorInstruction} = require('./../mirror-build-tools');
+const {setArchiveBaseDir} = require('./../package-modules');
+const {copyAdditionalPackages, processMirrorInstruction, setupIncrementalBuild} = require('./../mirror-build-tools');
 const {buildConfig: mirrorInstructions} = require('./../build-config/mirror-build-config');
 const buildState = require('../type/build-state');
 
@@ -39,16 +37,7 @@ if (options.gitRepoDir) {
   repo.setStorageDir(options.gitRepoDir);
 }
 
-if (options.ledger && !options.fullRebuild) {
-  setPublishedVersions(readLedger(options.ledger));
-}
-
-const refRecorder = (options.refs || options.refsOut) && createRefRecorder({
-  rows: options.refs ? readRefs(options.refs) : [],
-  skip: !options.fullRebuild,
-  listRemoteTags: repo.listRemoteTags,
-  pendingFile: options.refsOut || null,
-});
+const refRecorder = setupIncrementalBuild(options, mirrorInstructions);
 
 let releaseContext = new buildState({
   composerRepoUrl: options.repoUrl || 'https://mirror.mage-os.org/',

@@ -199,6 +199,14 @@ async function listFileNames(repoDir, path, excludes) {
 
 }
 
+function execGit(args, options, description) {
+  return new Promise((resolve, reject) => {
+    childProcess.execFile('git', args, options, (error, stdout, stderr) => {
+      error ? reject(`Error executing git ${description}: ${error.message}\n${stderr}`) : resolve(stdout);
+    });
+  });
+}
+
 /**
  * Return the set of repo-root-relative paths that git records as executable (tree mode 100755).
  *
@@ -221,11 +229,7 @@ async function listExecutablePaths(repoDir, pathInRepo) {
   // trusted build config rather than user input.
   const args = ['ls-tree', '-r', '-z', 'HEAD'];
   if (pathInRepo) args.push('--', pathInRepo);
-  const out = await new Promise((resolve, reject) => {
-    childProcess.execFile('git', args, {cwd: repoDir, maxBuffer: 256 * 1024 * 1024}, (error, stdout, stderr) => {
-      error ? reject(`Error executing git ls-tree in ${repoDir}: ${error.message}\n${stderr}`) : resolve(stdout);
-    });
-  });
+  const out = await execGit(args, {cwd: repoDir, maxBuffer: 256 * 1024 * 1024}, `ls-tree in ${repoDir}`);
   const executable = new Set();
   for (const entry of out.split("\0")) {
     // Each record is "<mode> <type> <sha>\t<path>"; only 100755 blobs are executable.
@@ -256,12 +260,7 @@ function parseRemoteTags(out) {
 }
 
 async function listRemoteTags(url) {
-  const out = await new Promise((resolve, reject) => {
-    childProcess.execFile('git', ['ls-remote', '--tags', '--', url], {maxBuffer: 64 * 1024 * 1024}, (error, stdout, stderr) => {
-      error ? reject(`Error executing git ls-remote for ${url}: ${error.message}\n${stderr}`) : resolve(stdout);
-    });
-  });
-  return parseRemoteTags(out);
+  return parseRemoteTags(await execGit(['ls-remote', '--tags', '--', url], {maxBuffer: 64 * 1024 * 1024}, `ls-remote for ${url}`));
 }
 
 async function createBranch(url, branch, ref) {

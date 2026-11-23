@@ -82,6 +82,7 @@ describe('ref-ledger', () => {
       const otherCheckout = fs.mkdtempSync(path.join(os.tmpdir(), 'ref-ledger-checkout-'));
       fs.mkdirSync(path.join(otherCheckout, 'src'));
       fs.copyFileSync(path.join(__dirname, '../../src/ref-ledger.js'), path.join(otherCheckout, 'src/ref-ledger.js'));
+      fs.copyFileSync(path.join(__dirname, '../../src/tsv-ledger.js'), path.join(otherCheckout, 'src/tsv-ledger.js'));
       const other = require(path.join(otherCheckout, 'src/ref-ledger.js'));
       const withTemplate = root => instruction({packageIndividual: [{
         label: 'Base',
@@ -221,6 +222,38 @@ describe('ref-ledger', () => {
         {instruction: 'magento2', tag: '2.4.6', commit: sha('6'), fingerprint, versions: [['magento/module-a', '100.4.6'], ['magento/module-b', '100.4.6']]},
         {instruction: 'magento2', tag: '2.4.0-p9', commit: sha('e'), fingerprint, versions: [['magento/module-a', '100.4.0-p9']]},
       ]);
+    });
+
+    it('lists the tags of the prefetched repositories once, a few at a time', async () => {
+      let running = 0;
+      let maxRunning = 0;
+      const slowListRemoteTags = jest.fn(async () => {
+        maxRunning = Math.max(maxRunning, ++running);
+        await new Promise(resolve => setTimeout(resolve, 5));
+        running--;
+        return remote;
+      });
+      const urls = Array.from({length: 5}, (_, i) => `https://github.com/mage-os/repo-${i}.git`);
+      const recorder = sut.createRefRecorder({listRemoteTags: slowListRemoteTags});
+
+      recorder.prefetch([...urls, urls[0]], 2);
+      await recorder.forInstruction(instruction({repoUrl: urls[4]}), URL);
+      await recorder.forInstruction(instruction({repoUrl: urls[0]}), URL);
+
+      expect(slowListRemoteTags.mock.calls.map(([url]) => url).sort()).toEqual(urls);
+      expect(maxRunning).toBe(2);
+    });
+
+    it('fails the instruction whose prefetched listing failed', async () => {
+      const failing = 'https://github.com/mage-os/gone.git';
+      const recorder = sut.createRefRecorder({
+        listRemoteTags: async url => url === failing ? Promise.reject('Error executing git ls-remote') : remote,
+      });
+
+      recorder.prefetch([failing, 'https://github.com/mage-os/mirror-magento2.git']);
+
+      await expect(recorder.forInstruction(instruction(), URL)).resolves.toBeDefined();
+      await expect(recorder.forInstruction(instruction({repoUrl: failing}), URL)).rejects.toBe('Error executing git ls-remote');
     });
   });
 });

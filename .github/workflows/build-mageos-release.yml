@@ -73,7 +73,7 @@ jobs:
       release_refs_file: ${{ inputs.release_refs_file }}
       ledger: release
       enforce_ledger: ${{ inputs.repo == 'https://repo.mage-os.org/' || inputs.remote_dir == '/var/www/repo.mage-os.org/html/' }}
-      full_rebuild: ${{ !(inputs.repo == 'https://repo.mage-os.org/' || inputs.remote_dir == '/var/www/repo.mage-os.org/html/') || inputs.full_rebuild == true }}
+      full_rebuild: ${{ inputs.full_rebuild == true }}
 
     secrets:
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}

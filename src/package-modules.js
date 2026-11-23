@@ -6,6 +6,8 @@ const JSZip = require('jszip');
 const repo = require("./repository");
 const {lastTwoDirs, httpSlurp, compareVersions} = require('./utils');
 const {isOnPackagist} = require('./packagist');
+const {readComposerJsonFromZip} = require('./package-aliases');
+const {publishedKey} = require('./ref-ledger');
 const repositoryBuildDefinition = require('./type/repository-build-definition');
 const packageDefinition = require('./type/package-definition');
 const buildState = require('./type/build-state');
@@ -78,13 +80,13 @@ function ensureArchiveDirectoryExists(archivePath) {
  */
 function setPublishedVersions(rows) {
   published = rows && {
-    versions: new Set(rows.map(row => `${row.name} ${row.version}`)),
+    versions: new Set(rows.map(row => publishedKey(row.name, row.version))),
     paths: new Set(rows.map(row => row.path)),
   };
 }
 
 function isPublished(name, version) {
-  return published !== null && published.versions.has(`${name} ${version}`);
+  return published !== null && published.versions.has(publishedKey(name, version));
 }
 
 /**
@@ -98,10 +100,12 @@ async function isPublishedArchive(relativePath, zipFile) {
   if (published.paths.has(relativePath)) {
     return true;
   }
-  const zip = await JSZip.loadAsync(fs.readFileSync(zipFile));
-  const composerJson = zip.file('composer.json');
-  const {name, version} = composerJson ? JSON.parse(await composerJson.async('string')) : {};
-  return isPublished(name, version);
+  try {
+    const {name, version} = await readComposerJsonFromZip(zipFile);
+    return isPublished(name, version);
+  } catch (exception) {
+    return false;
+  }
 }
 
 function archiveFilePath(name, version) {

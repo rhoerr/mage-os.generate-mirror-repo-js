@@ -9,9 +9,12 @@ const {
   createMetaPackageFromRepoDir,
   archiveFilePath,
   createComposerJsonOnlyPackage,
+  setPublishedVersions,
   isPublished,
   isPublishedArchive
 } = require('./package-modules');
+const {readLedger} = require('./package-ledger');
+const {createRefRecorder, readRefs} = require('./ref-ledger');
 const repositoryBuildDefinition = require('./type/repository-build-definition');
 const packageDefinition = require('./type/package-definition');
 const packageReplacement = require('./type/package-replacement');
@@ -23,13 +26,31 @@ const buildState = require('./type/build-state');
  * @param {String} url
  * @param {String} fromTag
  * @param {Array<String>} skipTags
- * @param {Object|null} refs Recorded tags of the instruction, see createRefRecorder()
+ * @param {Object} refs Recorded tags of the instruction, see createRefRecorder()
  * @returns {Promise<Array<String>>}
  */
-async function listTagsFrom(url, fromTag, skipTags, refs = null) {
+async function listTagsFrom(url, fromTag, skipTags, refs) {
   return (await repo.listTags(url))
     .filter(tag => isTagToBuild(tag, fromTag, skipTags))
-    .filter(tag => !(refs && refs.isRecorded(tag)));
+    .filter(tag => !refs.isRecorded(tag));
+}
+
+/**
+ * Build one tag, recording what it produced, or that it failed. A failing tag does not stop the others.
+ *
+ * @param {Object} refs
+ * @param {String} tag
+ * @param {Array<String>} built Gets the tag if it built
+ * @param {function(): Promise<Object>} build Resolves to the {name: version} of the packages built
+ */
+async function buildTag(refs, tag, built, build) {
+  try {
+    refs.built(tag, await build());
+    built.push(tag);
+  } catch (exception) {
+    refs.failed(tag, exception);
+    console.log(exception.message || exception);
+  }
 }
 
 function isTagToBuild(tag, fromTag, skipTags) {
@@ -70,7 +91,7 @@ async function copyAdditionalPackages(archiveDir) {
  * @param {packageDefinition} pkg
  * @returns {Array<String>} Packaged tags
  */
-async function createMetaPackagesFromRepoDir(instruction, pkg, refs = null) {
+async function createMetaPackagesFromRepoDir(instruction, pkg, refs) {
   const tags = await listTagsFrom(instruction.repoUrl, instruction.fromTag, instruction.skipTags, refs);
   console.log(`Versions to process: ${tags.join(', ')}`);
   const built = [];
@@ -83,18 +104,11 @@ async function createMetaPackagesFromRepoDir(instruction, pkg, refs = null) {
       dependencyVersions: (instruction.fixVersions?.[tag] ?? {})
     });
 
-    try {
-      const packages = await createMetaPackageFromRepoDir(
-        instruction,
-        pkg,
-        release
-      );
-      refs && refs.built(tag, packages);
-      built.push(tag);
-    } catch (exception) {
-      refs && refs.failed(tag, exception);
-      console.log(exception.message || exception);
-    }
+    await buildTag(refs, tag, built, () => createMetaPackageFromRepoDir(
+      instruction,
+      pkg,
+      release
+    ));
   }
   return built;
 }
@@ -104,7 +118,7 @@ async function createMetaPackagesFromRepoDir(instruction, pkg, refs = null) {
  * @param {packageDefinition} pkg
  * @returns {Array<String>} Packaged tags
  */
-async function createPackagesSinceTag(instruction, pkg, refs = null) {
+async function createPackagesSinceTag(instruction, pkg, refs) {
   const tags = await listTagsFrom(instruction.repoUrl, instruction.fromTag, instruction.skipTags, refs);
   console.log(`Versions to process: ${tags.join(', ')}`);
   const built = [];
@@ -116,18 +130,11 @@ async function createPackagesSinceTag(instruction, pkg, refs = null) {
       dependencyVersions: (instruction.fixVersions?.[tag] ?? {})
     });
 
-    try {
-      const packages = await createPackagesForRef(
-        instruction,
-        pkg,
-        release
-      );
-      refs && refs.built(tag, packages);
-      built.push(tag)
-    } catch (exception) {
-      refs && refs.failed(tag, exception);
-      console.log(exception.message || exception);
-    }
+    await buildTag(refs, tag, built, () => createPackagesForRef(
+      instruction,
+      pkg,
+      release
+    ));
   }
   return built;
 }
@@ -137,7 +144,7 @@ async function createPackagesSinceTag(instruction, pkg, refs = null) {
  * @param {packageDefinition} pkg
  * @returns {Array<String>} Packaged tags
  */
-async function createPackageSinceTag(instruction, pkg, refs = null) {
+async function createPackageSinceTag(instruction, pkg, refs) {
   const tags = await listTagsFrom(instruction.repoUrl, instruction.fromTag, instruction.skipTags, refs);
   const built = [];
 
@@ -165,18 +172,11 @@ async function createPackageSinceTag(instruction, pkg, refs = null) {
       dependencyVersions: (instruction.fixVersions?.[tag] ?? {})
     });
 
-    try {
-      const packages = await createPackageForRef(
-        instruction,
-        pkg,
-        release
-      );
-      refs && refs.built(tag, packages);
-      built.push(tag);
-    } catch (exception) {
-      refs && refs.failed(tag, exception);
-      console.log(exception.message || exception);
-    }
+    await buildTag(refs, tag, built, () => createPackageForRef(
+      instruction,
+      pkg,
+      release
+    ));
   }
   return built;
 }
@@ -216,10 +216,10 @@ async function replacePackageFiles(pkg) {
  * @param {repositoryBuildDefinition} instruction
  * @param {Object} metapackage
  * @param {buildState} releaseContext
- * @param {Object|null} refs
+ * @param {Object} refs
  * @returns {Array<String>} Packaged tags
  */
-async function createMetaPackagesSinceTag(instruction, metapackage, releaseContext, refs = null) {
+async function createMetaPackagesSinceTag(instruction, metapackage, releaseContext, refs) {
   const packageName = `${instruction.vendor}/${metapackage.name}`;
   const tags = await listTagsFrom(
     instruction.repoUrl,
@@ -259,7 +259,7 @@ async function createMetaPackagesSinceTag(instruction, metapackage, releaseConte
         return composerConfig;
       }
     );
-    refs && refs.built(tag, {[packageName]: tag});
+    refs.built(tag, {[packageName]: tag});
   }
   return tags;
 }
@@ -279,6 +279,38 @@ function isFullyRecorded(instruction, refs) {
     .every(tag => refs.isRecorded(tag));
 }
 
+const NO_REFS = {
+  isRecorded: () => false,
+  built() {},
+  failed() {},
+  done() {},
+};
+
+/**
+ * Skip the versions of the package ledger and the tags of the ref ledger the options name, unless
+ * --fullRebuild is given.
+ *
+ * @param {{ledger: String, refs: String, refsOut: String, fullRebuild: Boolean}} options
+ * @param {Array<repositoryBuildDefinition>} instructions The instructions the build will process
+ * @returns {Object|null} The refRecorder for processMirrorInstruction()
+ */
+function setupIncrementalBuild(options, instructions) {
+  if (options.ledger && !options.fullRebuild) {
+    setPublishedVersions(readLedger(options.ledger));
+  }
+  if (!options.refs && !options.refsOut) {
+    return null;
+  }
+  const refRecorder = createRefRecorder({
+    rows: options.refs ? readRefs(options.refs) : [],
+    skip: !options.fullRebuild,
+    listRemoteTags: repo.listRemoteTags,
+    pendingFile: options.refsOut || null,
+  });
+  refRecorder.prefetch(instructions.map(instruction => instruction.repoUrl));
+  return refRecorder;
+}
+
 /**
  * @param {repositoryBuildDefinition} instruction
  * @param {buildState} releaseContext
@@ -287,9 +319,9 @@ function isFullyRecorded(instruction, refs) {
  */
 async function processMirrorInstruction(instruction, releaseContext, refRecorder = null) {
   let tags = [];
-  const refs = refRecorder && await refRecorder.forInstruction(instruction, releaseContext.composerRepoUrl);
+  const refs = refRecorder ? await refRecorder.forInstruction(instruction, releaseContext.composerRepoUrl) : NO_REFS;
 
-  if (refs && isFullyRecorded(instruction, refs)) {
+  if (refRecorder && isFullyRecorded(instruction, refs)) {
     console.log(`All tags of ${instruction.key} are recorded, skipping it`);
     for (const packageReplacement of (instruction.packageReplacements)) {
       await replacePackageFiles(packageReplacement);
@@ -300,7 +332,7 @@ async function processMirrorInstruction(instruction, releaseContext, refRecorder
 
   await Promise.all(
     instruction.extraRefToRelease
-      .filter(extra => !(refs && refs.isRecorded(extra.release)))
+      .filter(extra => !refs.isRecorded(extra.release))
       .map(
         extra => repo.createTagForRef(instruction.repoUrl, extra.ref, extra.release, 'Mage-OS Extra Ref', extra.details)
       )
@@ -333,11 +365,12 @@ async function processMirrorInstruction(instruction, releaseContext, refRecorder
     tags = await createMetaPackagesSinceTag(instruction, metapackage, releaseContext, refs);
   }
 
-  refs && refs.done();
+  refs.done();
   repo.clearCache();
 }
 
 module.exports = {
   copyAdditionalPackages,
-  processMirrorInstruction
+  processMirrorInstruction,
+  setupIncrementalBuild
 }

@@ -11,12 +11,11 @@ const {
   validateVersionString,
 } = require('./../release-build-tools');
 const packageModules = require("../package-modules");
-const {setArchiveBaseDir, setPublishedVersions} = packageModules;
-const {readIncludedVersions, readLedger} = require('../package-ledger');
-const {createRefRecorder, readRefs} = require('../ref-ledger');
+const {setArchiveBaseDir} = packageModules;
+const {readIncludedVersions} = require('../package-ledger');
 const {generateAliasesFromBuiltPackages} = require("../package-aliases");
 const {buildConfig: releaseInstructions} = require('./../build-config/mageos-release-build-config');
-const {processMirrorInstruction} = require("../mirror-build-tools");
+const {processMirrorInstruction, setupIncrementalBuild} = require("../mirror-build-tools");
 const {fetchPackagistList} = require('../packagist');
 const buildState = require('../type/build-state');
 
@@ -78,22 +77,14 @@ if (upstreamRelease && ! mageosRelease) {
 const {refs: releaseRefs, pins: dependencyPins} = loadReleaseRefs(releaseRefsFile);
 
 const skipPublished = options.ledger && !options.fullRebuild;
-if (skipPublished) {
-  if (!skipAliases && !options.baseMetadata) {
-    throw new Error('--ledger skips published packages the aliases are generated from, it needs --baseMetadata or --skipAliases');
-  }
-  setPublishedVersions(readLedger(options.ledger));
+if (skipPublished && !skipAliases && !options.baseMetadata) {
+  throw new Error('--ledger skips published packages the aliases are generated from, it needs --baseMetadata or --skipAliases');
 }
 const baseVersions = skipPublished && !skipAliases
   ? readIncludedVersions(options.baseMetadata)
   : null;
 
-const refRecorder = (options.refs || options.refsOut) && createRefRecorder({
-  rows: options.refs ? readRefs(options.refs) : [],
-  skip: !options.fullRebuild,
-  listRemoteTags: repo.listRemoteTags,
-  pendingFile: options.refsOut || null,
-});
+const refRecorder = setupIncrementalBuild(options, skipHistory ? [] : releaseInstructions);
 
 let distroRelease = new buildState({
   version: mageosRelease,

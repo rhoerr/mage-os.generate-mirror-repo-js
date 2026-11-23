@@ -49,7 +49,7 @@ jobs:
       delete: true
       ledger: mirror
       enforce_ledger: ${{ inputs.repo == 'https://mirror.mage-os.org/' || inputs.remote_dir == '/var/www/mirror.mage-os.org/html/' }}
-      full_rebuild: ${{ !(inputs.repo == 'https://mirror.mage-os.org/' || inputs.remote_dir == '/var/www/mirror.mage-os.org/html/') || inputs.full_rebuild == true }}
+      full_rebuild: ${{ inputs.full_rebuild == true }}
     secrets:
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
       REMOTE_USER: ${{ secrets.REMOTE_USER }}
