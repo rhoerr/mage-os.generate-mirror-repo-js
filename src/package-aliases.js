@@ -79,6 +79,33 @@ async function createMagentoAliasPackage(magentoPackageName, magentoVersion, mag
 }
 
 /**
+ * The highest mage-os/* package version replacing each magento/* package version.
+ *
+ * @param {Array<Object>} composers - composer.json contents of the built mage-os/* packages
+ * @returns {Map<string, {magentoName: string, magentoVersion: string, mageOsName: string, mageOsVersion: string}>}
+ *   keyed by "magentoName:magentoVersion"
+ */
+function newestReplacers(composers) {
+  const replacers = new Map();
+  for (const composer of composers) {
+    if (!composer.replace || typeof composer.replace !== 'object') {
+      continue;
+    }
+    for (const [magentoName, magentoVersion] of Object.entries(composer.replace)) {
+      if (!magentoName.startsWith('magento/')) {
+        continue;
+      }
+      const key = `${magentoName}:${magentoVersion}`;
+      const existing = replacers.get(key);
+      if (!existing || compareVersions(composer.version, existing.mageOsVersion) > 0) {
+        replacers.set(key, {magentoName, magentoVersion, mageOsName: composer.name, mageOsVersion: composer.version});
+      }
+    }
+  }
+  return replacers;
+}
+
+/**
  * Generate magento/* alias metapackages by scanning all built mage-os/* packages.
  * Reads each package's composer.json to extract the replace entries and creates
  * corresponding alias packages. When multiple mage-os versions replace the same
@@ -102,40 +129,10 @@ async function generateAliasesFromBuiltPackages(archiveDir, packageModules) {
 
   console.log(`Scanning ${zipFiles.length} mage-os packages for alias generation...`);
 
-  // Collect all alias candidates: key is "magentoName:magentoVersion"
-  // value is {magentoName, magentoVersion, mageOsName, mageOsVersion}
-  const aliasCandidates = {};
-
+  const composers = [];
   for (const zipPath of zipFiles) {
     try {
-      const composer = await readComposerJsonFromZip(zipPath);
-
-      if (!composer.replace || typeof composer.replace !== 'object') {
-        continue;
-      }
-
-      const mageOsName = composer.name;
-      const mageOsVersion = composer.version;
-
-      for (const [magentoName, magentoVersion] of Object.entries(composer.replace)) {
-        // Only process magento/* packages
-        if (!magentoName.startsWith('magento/')) {
-          continue;
-        }
-
-        const key = `${magentoName}:${magentoVersion}`;
-        const existing = aliasCandidates[key];
-
-        // Keep the highest mage-os version for each magento alias
-        if (!existing || compareVersions(mageOsVersion, existing.mageOsVersion) > 0) {
-          aliasCandidates[key] = {
-            magentoName,
-            magentoVersion,
-            mageOsName,
-            mageOsVersion
-          };
-        }
-      }
+      composers.push(await readComposerJsonFromZip(zipPath));
     } catch (error) {
       report(`  Warning: Failed to read ${zipPath}: ${error.message || error}`);
     }
@@ -144,7 +141,7 @@ async function generateAliasesFromBuiltPackages(archiveDir, packageModules) {
   // Create alias packages for each winning candidate
   const aliasPackages = {};
 
-  for (const candidate of Object.values(aliasCandidates)) {
+  for (const candidate of newestReplacers(composers).values()) {
     const {magentoName, magentoVersion, mageOsName, mageOsVersion} = candidate;
 
     try {
@@ -172,5 +169,6 @@ async function generateAliasesFromBuiltPackages(archiveDir, packageModules) {
 module.exports = {
   createMagentoAliasPackage,
   generateAliasesFromBuiltPackages,
+  newestReplacers,
   readComposerJsonFromZip
 };

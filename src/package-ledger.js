@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const JSZip = require('jszip');
+const {newestReplacers, readComposerJsonFromZip} = require('./package-aliases');
 
 const FIELDS = ['name', 'version', 'version_normalized', 'path', 'sha1', 'sha256', 'published-time', 'source'];
 const SOURCES = ['upstream', 'tag', 'release', 'bootstrap', 'build'];
@@ -24,6 +25,8 @@ const STATUS = {
 
 // The exact format satis writes, so ledger and satis output compare as strings.
 const TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/;
+
+const RELEASE_PACKAGE = 'mage-os/product-community-edition';
 
 const NEW_VERSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -294,8 +297,8 @@ async function readAliasTarget(zipFile) {
  * Classify the packages satis was run over against the ledger.
  *
  * With allowAliasRepoint, a changed magento/* alias metapackage is accepted if all it does is
- * require a package version that is itself new in this build. Aliases point at the highest
- * version replacing them, so every release legitimately changes the aliases it supersedes.
+ * require the highest mage-os/* version replacing it in this build, which is the version the
+ * release build points the alias at. Every release legitimately changes the aliases it supersedes.
  */
 async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDiff = [], allowAliasRepoint = false, now = new Date()}) {
   const entries = await hashBuiltEntries(readSatisOutput(satisOutputDir, repoUrl), packagesDir);
@@ -310,7 +313,14 @@ async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDi
       alias && aliasTargets.set(rowKey(entry), alias);
     }
   }
-  return classify(rows, entries, {expectDiff, aliasTargets, now});
+  if (aliasTargets.size === 0) {
+    return results;
+  }
+  const composers = [];
+  for (const entry of entries.filter(entry => entry.path.startsWith('mage-os/'))) {
+    composers.push(await readComposerJsonFromZip(path.join(packagesDir, entry.path)));
+  }
+  return classify(rows, entries, {expectDiff, aliasTargets, replacers: newestReplacers(composers), now});
 }
 
 function globToRegExp(glob) {
@@ -344,15 +354,15 @@ function publishedTimeProblem(entry, row, now) {
  *
  * @param {Array<Object>} rows Ledger rows
  * @param {Array<Object>} entries {name, version, version_normalized, path, sha1, [sha256], [shasum], [publishedTime]}
- * @param {{expectDiff: Array<String>, aliasTargets: Map<String, Object>, now: Date}} options
- *   aliasTargets maps the rowKey of a changed alias metapackage to what readAliasTarget() returned for it
+ * @param {{expectDiff: Array<String>, aliasTargets: Map<String, Object>, replacers: Map<String, Object>, now: Date}} options
+ *   aliasTargets maps the rowKey of a changed alias metapackage to what readAliasTarget() returned for it,
+ *   replacers is what newestReplacers() returned for the mage-os/* packages of the build
  * @returns {Array<{status: String, problems: Array<String>, row: Object|null, entry: Object|null}>}
  */
-function classify(rows, entries, {expectDiff = [], aliasTargets = new Map(), now = new Date()} = {}) {
+function classify(rows, entries, {expectDiff = [], aliasTargets = new Map(), replacers = new Map(), now = new Date()} = {}) {
   const ledger = new Map(rows.map(row => [rowKey(row), row]));
   const expected = expectDiff.map(globToRegExp);
   const seen = new Set();
-  const newVersions = new Set();
 
   for (const entry of entries) {
     const key = rowKey(entry);
@@ -360,17 +370,16 @@ function classify(rows, entries, {expectDiff = [], aliasTargets = new Map(), now
       throw new Error(`Duplicate package version ${key}`);
     }
     seen.add(key);
-    if (!ledger.has(key)) {
-      newVersions.add(`${entry.name} ${entry.version}`);
-    }
   }
 
   const isAliasRepoint = entry => {
     const alias = aliasTargets.get(rowKey(entry));
-    return Boolean(alias)
+    const replacer = alias && replacers.get(`${alias.name}:${alias.version}`);
+    return Boolean(replacer)
       && alias.name === entry.name
       && alias.version === entry.version
-      && newVersions.has(`${alias.target.name} ${alias.target.version}`);
+      && alias.target.name === replacer.mageOsName
+      && alias.target.version === replacer.mageOsVersion;
   };
 
   const results = entries.map(entry => {
@@ -414,10 +423,9 @@ function classify(rows, entries, {expectDiff = [], aliasTargets = new Map(), now
 }
 
 /**
- * Reasons the classified build must not be deployed. A published-time or shasum problem can not be
- * waved through: allowChanges only covers changed and missing archives.
+ * Reasons the classified build must not be deployed.
  */
-function gateFailures(results, {allowChanges = false} = {}) {
+function gateFailures(results) {
   const failures = [];
   const count = status => results.filter(result => result.status === status).length;
   const problems = results.filter(result => result.problems.length > 0).length;
@@ -425,10 +433,10 @@ function gateFailures(results, {allowChanges = false} = {}) {
   if (problems > 0) {
     failures.push(`${problems} version(s) with a published-time or shasum problem`);
   }
-  if (!allowChanges && count(STATUS.MODIFIED) > 0) {
+  if (count(STATUS.MODIFIED) > 0) {
     failures.push(`${count(STATUS.MODIFIED)} already published version(s) modified`);
   }
-  if (!allowChanges && count(STATUS.MISSING) > 0) {
+  if (count(STATUS.MISSING) > 0) {
     failures.push(`${count(STATUS.MISSING)} already published version(s) missing from the build`);
   }
   return failures;
@@ -457,15 +465,36 @@ function nextRows(results) {
         });
         break;
       case STATUS.REPOINTED:
-      case STATUS.MODIFIED:
         rows.push({...row, version: entry.version, path: entry.path, sha1: entry.sha1, sha256: entry.sha256});
         break;
       case STATUS.EXPECTED:
         rows.push(row);
         break;
+      default:
+        throw new Error(`A build with ${status} versions can not be recorded`);
     }
   }
   return rows;
+}
+
+/**
+ * Reasons a deploy must not start, checked before anything is built.
+ *
+ * @param {Array<Object>} rows Ledger rows
+ * @param {{target: String, mageosRelease: String, publishTag: Boolean}} options target is "production" or "preview"
+ */
+function guardFailures(rows, {target, mageosRelease = '', publishTag = false}) {
+  const failures = [];
+  if (target === 'production' && mageosRelease && !publishTag) {
+    failures.push(`A production deploy of release ${mageosRelease} has to publish the release tag`);
+  }
+  if (target === 'preview' && publishTag) {
+    failures.push('A preview deploy can not publish a release tag');
+  }
+  if (mageosRelease && rows.some(row => row.name === RELEASE_PACKAGE && row.version === mageosRelease)) {
+    failures.push(`Release ${mageosRelease} is already published: ${RELEASE_PACKAGE} ${mageosRelease} is in the ledger`);
+  }
+  return failures;
 }
 
 function summarize(results) {
@@ -618,6 +647,7 @@ module.exports = {
   formatReport,
   formatTime,
   gateFailures,
+  guardFailures,
   nextRows,
   parseLedger,
   parseTimes,

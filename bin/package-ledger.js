@@ -10,11 +10,11 @@ const parseOptions = require('parse-options');
 const ledger = require('../src/package-ledger');
 
 const options = parseOptions(
-  `command $ledger $satisOutputDir $packagesDir $repoUrl $mode $expectDiff $times $defaultTime @allowChanges @allowAliasRepoint @update @checkTimes @help|h`,
+  `command $ledger $satisOutputDir $packagesDir $repoUrl $mode $expectDiff $times $defaultTime $target $mageosRelease $publishTag @allowAliasRepoint @update @checkTimes @help|h`,
   process.argv
 );
 
-const commands = {seed, verify, audit, bootstrap};
+const commands = {guard, seed, verify, audit, bootstrap};
 
 if (options.help || !commands[options.command] || !options.ledger) {
   console.log(`Maintain and check the package ledger of a composer repository.
@@ -23,6 +23,7 @@ Usage:
   node bin/package-ledger.js COMMAND --ledger=FILE [OPTIONS]
 
 Commands:
+  guard      Check the inputs of a deploy before anything is built
   seed       Write the published-time of every ledger entry into an empty satis output dir, before running satis
   verify     Compare the packages satis was run over against the ledger, before deploying them
   audit      Compare the metadata a live repository serves against the ledger
@@ -35,11 +36,14 @@ Options:
   --repoUrl=           verify, audit, bootstrap: Repository base URL (for example https://mirror.mage-os.org/)
   --mode=              verify: "gate" fails on changed or missing published packages, "report" only lists them (default: gate)
   --expectDiff=        verify: Comma separated globs of archive paths that are expected to differ from the ledger
-  --allowChanges       verify: Do not fail on changed or missing published packages
-  --allowAliasRepoint  verify: Accept changed alias metapackages that now require a package version new in this build
+  --allowAliasRepoint  verify: Accept changed magento/* alias metapackages that require the highest mage-os/* version
+                       replacing them in this build
   --update             verify: Write new and changed versions to the ledger if the gate passed
   --checkTimes         audit: Also check the p2 metadata composer 2 reads, including the published-time of
                        every version (one request per package)
+  --target=            guard: "production" or "preview"
+  --mageosRelease=     guard: The Mage-OS release the deploy builds, if any
+  --publishTag=        guard: "true" if the deploy publishes the release tag, otherwise "false"
   --times=             bootstrap: TSV file with name, version, published-time and source of known publication times
   --defaultTime=       bootstrap: published-time for versions not listed in --times
 `);
@@ -73,6 +77,22 @@ function fail(failures) {
   process.exitCode = 1;
 }
 
+async function guard() {
+  const target = requireOption('target');
+  if (!['production', 'preview'].includes(target)) {
+    throw new Error(`Unknown target "${target}"`);
+  }
+  if (!['true', 'false'].includes(options.publishTag)) {
+    throw new Error('--publishTag must be "true" or "false"');
+  }
+  const failures = ledger.guardFailures(ledger.readLedger(options.ledger), {
+    target,
+    mageosRelease: options.mageosRelease || '',
+    publishTag: options.publishTag === 'true',
+  });
+  failures.length > 0 ? fail(failures) : console.log('Deploy inputs are fine');
+}
+
 async function seed() {
   const count = ledger.writeSeeds(ledger.readLedger(options.ledger), options.satisOutputDir || 'build');
   console.log(`Seeded published-time for ${count} package metadata files`);
@@ -96,7 +116,7 @@ async function verify() {
   });
   report(results, `Package ledger ${path.basename(options.ledger)} (${mode})`);
 
-  const failures = ledger.gateFailures(results, {allowChanges: options.allowChanges});
+  const failures = ledger.gateFailures(results);
   if (mode === 'gate' && failures.length > 0) {
     return fail(failures);
   }

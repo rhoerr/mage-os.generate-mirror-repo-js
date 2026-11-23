@@ -271,42 +271,51 @@ describe('package-ledger', () => {
         ...overrides,
       }]]);
 
-      it('accepts a changed alias requiring a version that is new in this build', () => {
+      const replacedBy = (version, name = 'acme/alpha') => new Map([['magento/module-a:100.0.1', {
+        magentoName: 'magento/module-a',
+        magentoVersion: '100.0.1',
+        mageOsName: name,
+        mageOsVersion: version,
+      }]]);
+      const aliasStatus = options => statusOf(
+        sut.classify([alias, row()], [changedAlias, entryFor(row()), newEntry({version: '2.0.0'})], {now: NOW, ...options}),
+        'magento/module-a',
+        '100.0.1'
+      );
+
+      it('accepts a changed alias requiring the highest version replacing it', () => {
         const results = sut.classify(
           [alias, row()],
           [changedAlias, entryFor(row()), newEntry({version: '2.0.0'})],
-          {aliasTargets: pointingAt('2.0.0'), now: NOW}
+          {aliasTargets: pointingAt('2.0.0'), replacers: replacedBy('2.0.0'), now: NOW}
         );
         expect(statusOf(results, 'magento/module-a', '100.0.1')).toBe(STATUS.REPOINTED);
         expect(sut.gateFailures(results)).toEqual([]);
       });
 
-      it('reports a changed alias requiring an already published version as modified', () => {
-        const results = sut.classify(
-          [alias, row()],
-          [changedAlias, entryFor(row()), newEntry({version: '2.0.0'})],
-          {aliasTargets: pointingAt('1.0.0'), now: NOW}
-        );
-        expect(statusOf(results, 'magento/module-a', '100.0.1')).toBe(STATUS.MODIFIED);
+      it('accepts a changed alias requiring an already published version if that replaces it', () => {
+        expect(aliasStatus({aliasTargets: pointingAt('1.0.0'), replacers: replacedBy('1.0.0')})).toBe(STATUS.REPOINTED);
       });
 
-      it('reports a changed alias requiring a version that is not part of the build as modified', () => {
-        const results = sut.classify([alias], [changedAlias], {aliasTargets: pointingAt('9.9.9'), now: NOW});
-        expect(results[0].status).toBe(STATUS.MODIFIED);
+      it('reports a changed alias requiring an older version than the highest replacing it as modified', () => {
+        expect(aliasStatus({aliasTargets: pointingAt('1.0.0'), replacers: replacedBy('2.0.0')})).toBe(STATUS.MODIFIED);
+      });
+
+      it('reports a changed alias requiring a package that does not replace it as modified', () => {
+        expect(aliasStatus({aliasTargets: pointingAt('2.0.0'), replacers: replacedBy('2.0.0', 'acme/beta')})).toBe(STATUS.MODIFIED);
+      });
+
+      it('reports a changed alias nothing in the build replaces as modified', () => {
+        expect(aliasStatus({aliasTargets: pointingAt('2.0.0')})).toBe(STATUS.MODIFIED);
       });
 
       it('reports an alias archive declaring another package as modified', () => {
-        const results = sut.classify(
-          [alias],
-          [changedAlias, newEntry({version: '2.0.0'})],
-          {aliasTargets: pointingAt('2.0.0', {name: 'magento/module-b'}), now: NOW}
-        );
-        expect(statusOf(results, 'magento/module-a', '100.0.1')).toBe(STATUS.MODIFIED);
+        const aliasTargets = pointingAt('2.0.0', {name: 'magento/module-b'});
+        expect(aliasStatus({aliasTargets, replacers: replacedBy('2.0.0')})).toBe(STATUS.MODIFIED);
       });
 
       it('reports a changed alias as modified without alias information', () => {
-        const results = sut.classify([alias], [changedAlias, newEntry({version: '2.0.0'})], {now: NOW});
-        expect(statusOf(results, 'magento/module-a', '100.0.1')).toBe(STATUS.MODIFIED);
+        expect(aliasStatus({replacers: replacedBy('2.0.0')})).toBe(STATUS.MODIFIED);
       });
     });
   });
@@ -322,23 +331,23 @@ describe('package-ledger', () => {
       ]);
     });
 
-    it('accepts modified and missing versions with allowChanges', () => {
+    it('has no override for modified and missing versions', () => {
       const results = sut.classify([row(), row({version: '1.1.0'})], [entryFor(row(), changed)], {now: NOW});
-      expect(sut.gateFailures(results, {allowChanges: true})).toEqual([]);
+      expect(sut.gateFailures(results, {allowChanges: true})).toHaveLength(2);
     });
 
-    it('fails on re-stamped published-times even with allowChanges', () => {
+    it('fails on re-stamped published-times', () => {
       const rows = [row(), row({version: '1.1.0'})];
       const restamped = rows.map(r => entryFor(r, {publishedTime: '2026-11-11T11:55:00+00:00'}));
       const results = sut.classify(rows, restamped, {now: NOW});
-      expect(sut.gateFailures(results, {allowChanges: true})).toEqual([
+      expect(sut.gateFailures(results)).toEqual([
         '2 version(s) with a published-time or shasum problem',
       ]);
     });
 
-    it('fails on a backdated new version even with allowChanges', () => {
+    it('fails on a backdated new version', () => {
       const results = sut.classify([], [newEntry({publishedTime: '2020-01-01T00:00:00+00:00'})], {now: NOW});
-      expect(sut.gateFailures(results, {allowChanges: true})).toHaveLength(1);
+      expect(sut.gateFailures(results)).toHaveLength(1);
     });
   });
 
@@ -363,20 +372,72 @@ describe('package-ledger', () => {
       })]);
     });
 
-    it('records the hashes of modified and repointed versions but keeps their published-time', () => {
+    it('records the hashes of repointed aliases but keeps their published-time', () => {
+      const alias = row({name: 'magento/module-a', version: '100.0.1'});
       const changed = {sha1: sha1('changed'), sha256: sha256('changed'), shasum: sha1('changed')};
-      const results = sut.classify([row()], [entryFor(row(), changed)], {now: NOW});
-      expect(sut.nextRows(results)).toEqual([row({sha1: sha1('changed'), sha256: sha256('changed')})]);
+      const results = sut.classify([alias], [entryFor(alias, changed)], {
+        aliasTargets: new Map([[sut.rowKey(alias), {name: 'magento/module-a', version: '100.0.1', target: {name: 'acme/alpha', version: '2.0.0'}}]]),
+        replacers: new Map([['magento/module-a:100.0.1', {mageOsName: 'acme/alpha', mageOsVersion: '2.0.0'}]]),
+        now: NOW,
+      });
+      expect(results[0].status).toBe(STATUS.REPOINTED);
+      expect(sut.nextRows(results)).toEqual([{...alias, sha1: sha1('changed'), sha256: sha256('changed')}]);
     });
 
-    it('drops missing versions and keeps expected differences as recorded', () => {
+    it('refuses to record modified or missing versions', () => {
+      const changed = {sha1: sha1('changed'), shasum: sha1('changed')};
+      expect(() => sut.nextRows(sut.classify([row()], [entryFor(row(), changed)], {now: NOW}))).toThrow(/modified/);
+      expect(() => sut.nextRows(sut.classify([row()], [], {now: NOW}))).toThrow(/missing/);
+    });
+
+    it('keeps expected differences as recorded', () => {
       const project = row({name: 'acme/project-community-edition'});
       const results = sut.classify(
-        [project, row()],
+        [project],
         [entryFor(project, {sha1: sha1('preview'), shasum: sha1('preview')})],
         {expectDiff: ['*/project-community-edition-*'], now: NOW}
       );
       expect(sut.nextRows(results)).toEqual([project]);
+    });
+  });
+
+  describe('guardFailures', () => {
+    const rows = [row({name: 'mage-os/product-community-edition', version: '2.0.0'})];
+
+    it('accepts a production release that publishes its tag', () => {
+      expect(sut.guardFailures(rows, {target: 'production', mageosRelease: '2.1.0', publishTag: true})).toEqual([]);
+    });
+
+    it('accepts deploys without a release', () => {
+      expect(sut.guardFailures(rows, {target: 'production', mageosRelease: '', publishTag: false})).toEqual([]);
+      expect(sut.guardFailures(rows, {target: 'preview', mageosRelease: '', publishTag: false})).toEqual([]);
+    });
+
+    it('accepts a preview of a new release without a tag', () => {
+      expect(sut.guardFailures(rows, {target: 'preview', mageosRelease: '2.1.0', publishTag: false})).toEqual([]);
+    });
+
+    it('requires a production release to publish its tag', () => {
+      expect(sut.guardFailures(rows, {target: 'production', mageosRelease: '2.1.0', publishTag: false})).toEqual([
+        'A production deploy of release 2.1.0 has to publish the release tag',
+      ]);
+    });
+
+    it('refuses to publish a tag from a preview', () => {
+      expect(sut.guardFailures(rows, {target: 'preview', mageosRelease: '2.1.0', publishTag: true})).toEqual([
+        'A preview deploy can not publish a release tag',
+      ]);
+    });
+
+    it.each(['production', 'preview'])('refuses a release that is already in the ledger on %s', target => {
+      expect(sut.guardFailures(rows, {target, mageosRelease: '2.0.0', publishTag: target === 'production'})).toEqual([
+        'Release 2.0.0 is already published: mage-os/product-community-edition 2.0.0 is in the ledger',
+      ]);
+    });
+
+    it('only looks at the release metapackage', () => {
+      const moduleRows = [row({name: 'mage-os/module-catalog', version: '2.1.0'})];
+      expect(sut.guardFailures(moduleRows, {target: 'production', mageosRelease: '2.1.0', publishTag: true})).toEqual([]);
     });
   });
 
@@ -527,7 +588,7 @@ describe('package-ledger', () => {
       const results = await sut.verifyBuild(rows, {satisOutputDir: dir, packagesDir: path.join(dir, 'packages'), repoUrl: REPO_URL});
 
       expect(sut.summarize(results)).toMatchObject({unchanged: 2, problems: 2});
-      expect(sut.gateFailures(results, {allowChanges: true})).toHaveLength(1);
+      expect(sut.gateFailures(results)).toHaveLength(1);
     });
 
     it('fails the gate when the metadata has no published-time at all', async () => {
@@ -539,28 +600,64 @@ describe('package-ledger', () => {
       expect(sut.summarize(results).problems).toBe(2);
     });
 
-    it('only accepts a repointed alias when asked to', async () => {
-      const zip = new JSZip();
-      zip.file('composer.json', JSON.stringify({
+    describe('alias repoint', () => {
+      const ALIAS_TIME = '2024-05-01T10:00:00+00:00';
+      const options = () => ({satisOutputDir: dir, packagesDir: path.join(dir, 'packages'), repoUrl: REPO_URL});
+      const rows = [ledgerRow('magento/module-a', '100.0.1', 'alias requiring mage-os/module-a 1.0.0', ALIAS_TIME)];
+
+      async function zipOf(composer) {
+        const zip = new JSZip();
+        zip.file('composer.json', JSON.stringify(composer));
+        return zip.generateAsync({type: 'nodebuffer'});
+      }
+
+      const replacer = version => zipOf({name: 'mage-os/module-a', version, replace: {'magento/module-a': '100.0.1'}});
+      const aliasRequiring = version => zipOf({
         name: 'magento/module-a',
         type: 'metapackage',
         version: '100.0.1',
-        require: {'acme/alpha': '2.0.0'},
-      }));
-      const aliasContent = await zip.generateAsync({type: 'nodebuffer'});
-      const stamped = sut.formatTime(new Date());
-      writeBuild({
-        'acme/alpha': [{version: '2.0.0', content: 'alpha 2.0.0', time: stamped}],
-        'magento/module-a': [{version: '100.0.1', content: aliasContent, time: '2024-05-01T10:00:00+00:00'}],
+        require: {'mage-os/module-a': version},
       });
-      const rows = [ledgerRow('magento/module-a', '100.0.1', 'alias requiring alpha 1.0.0', '2024-05-01T10:00:00+00:00')];
-      const options = {satisOutputDir: dir, packagesDir: path.join(dir, 'packages'), repoUrl: REPO_URL};
 
-      const strict = await sut.verifyBuild(rows, options);
-      const lenient = await sut.verifyBuild(rows, {...options, allowAliasRepoint: true});
+      async function writeAliasBuild(replacerVersions, aliasTarget) {
+        const stamped = sut.formatTime(new Date());
+        const aliasContent = await aliasRequiring(aliasTarget);
+        writeBuild({
+          'mage-os/module-a': await Promise.all(replacerVersions.map(async version => (
+            {version, content: await replacer(version), time: stamped}
+          ))),
+          'magento/module-a': [{version: '100.0.1', content: aliasContent, time: ALIAS_TIME}],
+        });
+        return aliasContent;
+      }
 
-      expect(statusOf(strict, 'magento/module-a', '100.0.1')).toBe(STATUS.MODIFIED);
-      expect(statusOf(lenient, 'magento/module-a', '100.0.1')).toBe(STATUS.REPOINTED);
+      it('only accepts a repointed alias when asked to', async () => {
+        const aliasContent = await writeAliasBuild(['1.0.0', '2.0.0'], '2.0.0');
+
+        const strict = await sut.verifyBuild(rows, options());
+        const lenient = await sut.verifyBuild(rows, {...options(), allowAliasRepoint: true});
+
+        expect(statusOf(strict, 'magento/module-a', '100.0.1')).toBe(STATUS.MODIFIED);
+        expect(statusOf(lenient, 'magento/module-a', '100.0.1')).toBe(STATUS.REPOINTED);
+        expect(sut.gateFailures(lenient)).toEqual([]);
+        expect(sut.nextRows(lenient).find(r => r.name === 'magento/module-a')).toEqual({
+          ...rows[0],
+          sha1: sha1(aliasContent),
+          sha256: sha256(aliasContent),
+        });
+      });
+
+      it('rejects an alias requiring an older version than the highest one replacing it in the build', async () => {
+        await writeAliasBuild(['1.0.0', '2.0.0'], '1.0.0');
+        const results = await sut.verifyBuild(rows, {...options(), allowAliasRepoint: true});
+        expect(statusOf(results, 'magento/module-a', '100.0.1')).toBe(STATUS.MODIFIED);
+      });
+
+      it('fails on a mage-os archive it can not read', async () => {
+        await writeAliasBuild(['2.0.0'], '2.0.0');
+        fs.writeFileSync(path.join(dir, 'packages', 'mage-os', 'module-a-2.0.0.zip'), 'no zip');
+        await expect(sut.verifyBuild(rows, {...options(), allowAliasRepoint: true})).rejects.toThrow();
+      });
     });
   });
 
