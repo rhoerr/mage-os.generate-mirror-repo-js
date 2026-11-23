@@ -78,6 +78,25 @@ describe('ref-ledger', () => {
       expect(sut.instructionFingerprint(instruction(overrides), URL)).not.toBe(sut.instructionFingerprint(instruction(), URL));
     });
 
+    it('is the same in every checkout of this repository', () => {
+      const otherCheckout = fs.mkdtempSync(path.join(os.tmpdir(), 'ref-ledger-checkout-'));
+      fs.mkdirSync(path.join(otherCheckout, 'src'));
+      fs.copyFileSync(path.join(__dirname, '../../src/ref-ledger.js'), path.join(otherCheckout, 'src/ref-ledger.js'));
+      const other = require(path.join(otherCheckout, 'src/ref-ledger.js'));
+      const withTemplate = root => instruction({packageIndividual: [{
+        label: 'Base',
+        dir: '',
+        composerJsonPath: `${root}/src/build-config/../../resource/composer-templates/magento/magento2-base/template.json`,
+      }]});
+
+      try {
+        expect(other.instructionFingerprint(withTemplate(otherCheckout), URL))
+          .toBe(sut.instructionFingerprint(withTemplate(path.join(__dirname, '../..')), URL));
+      } finally {
+        fs.rmSync(otherCheckout, {recursive: true, force: true});
+      }
+    });
+
     it('changes with the composer repository url', () => {
       expect(sut.instructionFingerprint(instruction(), 'https://preview-mirror.mage-os.org/'))
         .not.toBe(sut.instructionFingerprint(instruction(), URL));

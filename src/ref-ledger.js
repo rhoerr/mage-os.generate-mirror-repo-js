@@ -15,6 +15,8 @@ const FIELDS = ['instruction', 'tag', 'commit', 'fingerprint'];
 // createPackageForRef adds these to the excludes of every package it builds
 const IMPLIED_EXCLUDES = ['composer.json', '.git/'];
 
+const ROOT = path.resolve(__dirname, '..');
+
 /**
  * Whether building the same commit again would fail the same way: the generator rejecting what it read
  * (it throws plain objects for that), or a file the tag does not have. Anything else, a failing git
@@ -115,6 +117,10 @@ function instructionFingerprint(instruction, composerRepoUrl) {
     }
     if (key === 'excludes' && Array.isArray(value)) {
       return value.filter(exclude => !IMPLIED_EXCLUDES.includes(exclude));
+    }
+    // The build config refers to files of this repository by absolute path, which depends on the checkout
+    if (typeof value === 'string' && path.isAbsolute(value) && path.resolve(value).startsWith(ROOT + path.sep)) {
+      return path.relative(ROOT, value);
     }
     return value;
   });
