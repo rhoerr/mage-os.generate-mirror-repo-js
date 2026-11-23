@@ -316,10 +316,11 @@ async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDi
   if (aliasTargets.size === 0) {
     return results;
   }
-  const composers = [];
-  for (const entry of entries.filter(entry => entry.path.startsWith('mage-os/'))) {
-    composers.push(await readComposerJsonFromZip(path.join(packagesDir, entry.path)));
-  }
+  const composers = await mapConcurrent(
+    entries.filter(entry => entry.path.startsWith('mage-os/')),
+    8,
+    entry => readComposerJsonFromZip(path.join(packagesDir, entry.path))
+  );
   return classify(rows, entries, {expectDiff, aliasTargets, replacers: newestReplacers(composers), now});
 }
 
