@@ -66,6 +66,16 @@ describe('bin/package-ledger.js', () => {
       expect(result.status).not.toBe(0);
       expect(fs.readFileSync(ledgerFile, 'utf8')).toContain(sha1('published'));
     });
+
+    it.each([
+      ['*/product-community-edition-*', 0],
+      ['*/project-community-edition-*', 1],
+    ])('as the end-of-run check of a preview with --expectDiff=%s exits %i', (expectDiff, status) => {
+      const before = fs.readFileSync(ledgerFile, 'utf8');
+      const result = run('verify', '--satisOutputDir=build', `--repoUrl=${REPO_URL}`, '--mode=gate', `--expectDiff=${expectDiff}`);
+      expect(result.status).toBe(status);
+      expect(fs.readFileSync(ledgerFile, 'utf8')).toBe(before);
+    });
   });
 
   describe('guard', () => {
