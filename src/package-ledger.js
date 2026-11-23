@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const JSZip = require('jszip');
 const {newestReplacers, readComposerJsonFromZip} = require('./package-aliases');
 
-const FIELDS = ['name', 'version', 'version_normalized', 'path', 'sha1', 'sha256', 'published-time', 'source'];
+const FIELDS = ['name', 'version', 'version_normalized', 'path', 'sha1', 'sha256', 'metadata-sha256', 'published-time', 'source'];
 const SOURCES = ['upstream', 'tag', 'release', 'bootstrap', 'build'];
 
 const STATUS = {
@@ -77,6 +77,9 @@ function validateRow(row, context) {
   }
   if (row.sha256 !== '' && !/^[0-9a-f]{64}$/.test(row.sha256)) {
     throw new Error(`${context}: invalid sha256`);
+  }
+  if (!/^[0-9a-f]{64}$/.test(row['metadata-sha256'])) {
+    throw new Error(`${context}: invalid metadata-sha256`);
   }
   if (!TIME_PATTERN.test(row['published-time']) || Number.isNaN(Date.parse(row['published-time']))) {
     throw new Error(`${context}: published-time must be UTC in the form YYYY-MM-DDTHH:MM:SS+00:00`);
@@ -172,6 +175,47 @@ function writeSeeds(rows, satisOutputDir) {
   return Object.keys(seeds).length;
 }
 
+const METADATA_FIELDS = ['name', 'version', 'type', 'require', 'require-dev', 'replace', 'provide', 'conflict', 'suggest', 'autoload', 'extra', 'bin'];
+const LINK_FIELDS = ['require', 'require-dev', 'replace', 'provide', 'conflict'];
+
+// PHP decodes {} and [] to the same empty array, so satis metadata can not tell them apart.
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return '[' + value.map(canonicalJson).join(',') + ']';
+  }
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return keys.length === 0 ? '[]' : '{' + keys.map(key => JSON.stringify(key) + ':' + canonicalJson(value[key])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+function isEmptyValue(value) {
+  return value === undefined || value === null || value === ''
+    || (typeof value === 'object' && Object.keys(value).length === 0);
+}
+
+/**
+ * Hash of the composer.json fields composer resolves with. It is the same for a package's composer.json
+ * and for the metadata satis generated from it, so a satis upgrade does not change it.
+ */
+function metadataSha256(composer) {
+  const selected = {};
+  for (const field of METADATA_FIELDS) {
+    // Composer loads a package without a type as a library, and lower-cases the type and the link targets
+    let value = composer[field];
+    if (field === 'type') {
+      value = String(value || 'library').toLowerCase();
+    } else if (LINK_FIELDS.includes(field) && value !== null && typeof value === 'object') {
+      value = Object.fromEntries(Object.entries(value).map(([name, constraint]) => [name.toLowerCase(), constraint]));
+    }
+    if (!isEmptyValue(value)) {
+      selected[field] = value;
+    }
+  }
+  return crypto.createHash('sha256').update(canonicalJson(selected)).digest('hex');
+}
+
 function trailingSlash(url) {
   return url.endsWith('/') ? url : url + '/';
 }
@@ -194,6 +238,7 @@ function metadataEntries(data, packageName, repoUrl) {
       path: url.slice(prefix.length),
       shasum: version.dist.shasum || '',
       publishedTime: version['published-time'] || '',
+      metadataSha256: metadataSha256(version),
     };
   });
 }
@@ -350,11 +395,11 @@ function publishedTimeProblem(entry, row, now) {
 /**
  * Compare package versions (from a build, or from a live repository) against the ledger.
  *
- * Entries without a sha256 are compared on sha1 only, and entries without a shasum/publishedTime
+ * Entries without a sha256 are compared on sha1 only, and entries without a shasum/publishedTime/metadataSha256
  * property skip the respective check, which is how a metadata-only audit uses this.
  *
  * @param {Array<Object>} rows Ledger rows
- * @param {Array<Object>} entries {name, version, version_normalized, path, sha1, [sha256], [shasum], [publishedTime]}
+ * @param {Array<Object>} entries {name, version, version_normalized, path, sha1, [sha256], [shasum], [publishedTime], [metadataSha256]}
  * @param {{expectDiff: Array<String>, aliasTargets: Map<String, Object>, replacers: Map<String, Object>, now: Date}} options
  *   aliasTargets maps the rowKey of a changed alias metapackage to what readAliasTarget() returned for it,
  *   replacers is what newestReplacers() returned for the mage-os/* packages of the build
@@ -412,6 +457,9 @@ function classify(rows, entries, {expectDiff = [], aliasTargets = new Map(), rep
     } else {
       status = STATUS.MODIFIED;
     }
+    if (status === STATUS.UNCHANGED && entry.metadataSha256 !== undefined && entry.metadataSha256 !== row['metadata-sha256']) {
+      problems.push(`metadata-sha256 ${entry.metadataSha256} does not match the ledger (${row['metadata-sha256']})`);
+    }
     return {status, problems, row, entry};
   });
 
@@ -461,12 +509,20 @@ function nextRows(results) {
           path: entry.path,
           sha1: entry.sha1,
           sha256: entry.sha256,
+          'metadata-sha256': entry.metadataSha256,
           'published-time': entry.publishedTime,
           source: 'build',
         });
         break;
       case STATUS.REPOINTED:
-        rows.push({...row, version: entry.version, path: entry.path, sha1: entry.sha1, sha256: entry.sha256});
+        rows.push({
+          ...row,
+          version: entry.version,
+          path: entry.path,
+          sha1: entry.sha1,
+          sha256: entry.sha256,
+          'metadata-sha256': entry.metadataSha256,
+        });
         break;
       case STATUS.EXPECTED:
         rows.push(row);
@@ -619,6 +675,7 @@ function bootstrapRows(entries, times, {defaultTime = null, now = new Date()} = 
       path: entry.path,
       sha1: entry.sha1,
       sha256: '',
+      'metadata-sha256': entry.metadataSha256,
       'published-time': formatTime(new Date(usable ? known.time : defaultTime)),
       source: usable ? known.source : 'bootstrap',
     };
@@ -649,6 +706,7 @@ module.exports = {
   formatTime,
   gateFailures,
   guardFailures,
+  metadataSha256,
   nextRows,
   parseLedger,
   parseTimes,

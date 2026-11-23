@@ -24,6 +24,7 @@ function row(overrides = {}) {
     path: `${name}-${version}.zip`,
     sha1: sha1(`${name} ${version}`),
     sha256: '',
+    'metadata-sha256': sut.metadataSha256({name, version}),
     'published-time': '2024-05-01T10:00:00+00:00',
     source: 'tag',
     ...overrides,
@@ -40,6 +41,7 @@ function entryFor(ledgerRow, overrides = {}) {
     sha256: sha256(`${ledgerRow.name} ${ledgerRow.version}`),
     shasum: ledgerRow.sha1,
     publishedTime: ledgerRow['published-time'],
+    metadataSha256: ledgerRow['metadata-sha256'],
     ...overrides,
   };
 }
@@ -102,6 +104,7 @@ describe('package-ledger', () => {
     it.each([
       ['sha1', {sha1: 'abc'}],
       ['sha256', {sha256: 'abc'}],
+      ['metadata-sha256', {'metadata-sha256': ''}],
       ['published-time without UTC offset', {'published-time': '2024-05-01T10:00:00-05:00'}],
       ['published-time that is no date', {'published-time': '2024-13-41T10:00:00+00:00'}],
       ['source', {source: 'guess'}],
@@ -118,7 +121,7 @@ describe('package-ledger', () => {
     it('rejects a file with a wrong header or field count', () => {
       const text = sut.formatLedger([row()]);
       expect(() => sut.parseLedger(text.replace('name\t', 'package\t'))).toThrow(/header/);
-      expect(() => sut.parseLedger(text + 'acme/alpha\t1.0.0\n')).toThrow(/expected 8 fields/);
+      expect(() => sut.parseLedger(text + 'acme/alpha\t1.0.0\n')).toThrow(/expected 9 fields/);
     });
 
     it('writes and reads a ledger file, creating the directory', () => {
@@ -167,7 +170,59 @@ describe('package-ledger', () => {
     });
   });
 
+  describe('metadataSha256', () => {
+    const composerJson = {
+      name: 'acme/alpha',
+      description: 'Not hashed',
+      version: '1.0.0',
+      require: {php: '>=8.1', 'Acme/Beta': '^2.0'},
+      'require-dev': {},
+      autoload: {'psr-4': {'Acme\\Alpha\\': ''}, files: ['registration.php']},
+      extra: {map: {}, 'branch-alias': {'dev-main': '1.0-dev'}},
+    };
+
+    // What satis writes for that composer.json
+    const satisEntry = {
+      name: 'acme/alpha',
+      version: '1.0.0',
+      version_normalized: '1.0.0.0',
+      dist: {type: 'zip', url: `${REPO_URL}packages/acme/alpha-1.0.0.zip`, shasum: sha1('a')},
+      require: {'acme/beta': '^2.0', php: '>=8.1'},
+      type: 'library',
+      extra: {'branch-alias': {'dev-main': '1.0-dev'}, map: []},
+      autoload: {files: ['registration.php'], 'psr-4': {'Acme\\Alpha\\': ''}},
+      description: 'Not hashed either',
+      'published-time': '2024-05-01T10:00:00+00:00',
+    };
+
+    it('is the same for a composer.json and the satis metadata generated from it', async () => {
+      const zip = new JSZip();
+      zip.file('composer.json', JSON.stringify(composerJson, null, 4));
+      const archive = path.join(dir, 'alpha.zip');
+      fs.writeFileSync(archive, await zip.generateAsync({type: 'nodebuffer'}));
+      const {readComposerJsonFromZip} = require('../../src/package-aliases');
+
+      expect(sut.metadataSha256(await readComposerJsonFromZip(archive))).toBe(sut.metadataSha256(satisEntry));
+      expect(sut.metadataSha256(satisEntry)).toBe('76a97c182ddb7808cbc9564930f5207db6592b977c775242a8065776ea34743b');
+    });
+
+    it.each([
+      ['a require constraint', {require: {...composerJson.require, php: '>=8.2'}}],
+      ['the type', {type: 'magento2-module'}],
+      ['the autoload files order', {autoload: {...composerJson.autoload, files: ['a.php', 'registration.php']}}],
+      ['the version', {version: '1.0.1'}],
+    ])('changes with %s', (_, overrides) => {
+      expect(sut.metadataSha256({...composerJson, ...overrides})).not.toBe(sut.metadataSha256(composerJson));
+    });
+  });
+
   describe('classify', () => {
+    it('flags an unchanged archive whose metadata does not match the ledger', () => {
+      const results = sut.classify([row()], [entryFor(row(), {metadataSha256: sha256('other')})], {now: NOW});
+      expect(results[0].status).toBe(STATUS.UNCHANGED);
+      expect(results[0].problems).toEqual([expect.stringMatching(/metadata-sha256 .* does not match the ledger/)]);
+    });
+
     it('reports a build matching the ledger as unchanged', () => {
       const rows = [row(), row({version: '1.1.0'})];
       const results = sut.classify(rows, rows.map(r => entryFor(r)), {now: NOW});
@@ -524,10 +579,12 @@ describe('package-ledger', () => {
         {
           name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip',
           shasum: sha1('a'), publishedTime: '2024-05-01T10:00:00+00:00',
+          metadataSha256: sut.metadataSha256({name: 'acme/alpha', version: '1.0.0'}),
         },
         {
           name: 'acme/alpha', version: '1.1-dev', version_normalized: '1.1.0.0-dev', path: 'acme/alpha-1.1-dev.zip',
           shasum: sha1('b'), publishedTime: '2024-06-01T10:00:00+00:00',
+          metadataSha256: sut.metadataSha256({name: 'acme/alpha', version: '1.1-dev'}),
         },
       ]);
     });
@@ -689,10 +746,14 @@ describe('package-ledger', () => {
 
       const entries = await sut.fetchRepoEntries('https://repo.example.com', fetchJson);
 
-      expect(entries).toEqual([
-        {name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip', sha1: sha1('acme/alpha 1.0.0')},
-        {name: 'acme/alpha', version: '1.1.0', version_normalized: '1.1.0.0', path: 'acme/alpha-1.1.0.zip', sha1: sha1('acme/alpha 1.1.0')},
-      ]);
+      expect(entries).toEqual(['1.0.0', '1.1.0'].map(v => ({
+        name: 'acme/alpha',
+        version: v,
+        version_normalized: `${v}.0`,
+        path: `acme/alpha-${v}.zip`,
+        sha1: sha1(`acme/alpha ${v}`),
+        metadataSha256: sut.metadataSha256({name: 'acme/alpha', version: v}),
+      })));
     });
 
     it('reads versions and published-time from the p2 metadata', async () => {
@@ -738,14 +799,17 @@ describe('package-ledger', () => {
   });
 
   describe('bootstrapRows', () => {
-    const entry = {name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip', sha1: sha1('a')};
+    const metadataSha256 = sut.metadataSha256({name: 'acme/alpha', version: '1.0.0'});
+    const entry = {name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip', sha1: sha1('a'), metadataSha256};
     const DEFAULT = '2026-01-01T00:00:00+00:00';
 
     it('uses the known publication time, normalized to UTC', () => {
       const times = sut.parseTimes('acme/alpha\t1.0.0\t2024-05-01T05:00:00-05:00\tupstream\n');
+      const {metadataSha256: _, ...fields} = entry;
       expect(sut.bootstrapRows([entry], times, {now: NOW})).toEqual([{
-        ...entry,
+        ...fields,
         sha256: '',
+        'metadata-sha256': metadataSha256,
         'published-time': '2024-05-01T10:00:00+00:00',
         source: 'upstream',
       }]);

@@ -28,6 +28,7 @@ describe('bin/package-ledger.js', () => {
       path: 'mage-os/product-community-edition-2.0.0.zip',
       sha1: sha1('published'),
       sha256: '',
+      'metadata-sha256': ledger.metadataSha256({name: 'mage-os/product-community-edition', version: '2.0.0'}),
       'published-time': TIME,
       source: 'tag',
     }]);

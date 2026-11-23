@@ -138,7 +138,8 @@ docker build -t magece/mirror-repo-js .
 
 `resource/ledger/mirror.tsv` and `resource/ledger/release.tsv` record every package version published to
 https://mirror.mage-os.org and https://repo.mage-os.org. There is one line per version, with the archive path, its sha1
-and sha256, the `published-time` served to composer, and the source of that time: `build` for versions recorded by a
+and sha256, the `metadata-sha256` of the composer.json fields composer resolves with (name, version, type, the links,
+suggest, autoload, extra and bin), the `published-time` served to composer, and the source of that time: `build` for versions recorded by a
 deploy, or `upstream`, `tag`, `release` and `bootstrap` for versions published before the ledger existed.  
 The nightly repositories have no ledger.
 
