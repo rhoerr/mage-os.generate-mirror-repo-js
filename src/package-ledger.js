@@ -10,6 +10,7 @@ const path = require('path');
 const crypto = require('crypto');
 const JSZip = require('jszip');
 const {aliasTarget, newestReplacers, readComposerJsonFromZip} = require('./package-aliases');
+const {tsvLedger} = require('./tsv-ledger');
 
 const FIELDS = ['name', 'version', 'version_normalized', 'path', 'sha1', 'sha256', 'metadata-sha256', 'published-time', 'source'];
 const SOURCES = ['upstream', 'tag', 'release', 'bootstrap', 'build'];
@@ -89,53 +90,13 @@ function validateRow(row, context) {
   }
 }
 
-function assertUniqueKeys(rows, context) {
-  const seen = new Set();
-  for (const row of rows) {
-    const key = rowKey(row);
-    if (seen.has(key)) {
-      throw new Error(`${context}: duplicate entry for ${key}`);
-    }
-    seen.add(key);
-  }
-}
-
-function parseLedger(text) {
-  const lines = text.split('\n');
-  if (lines[lines.length - 1] === '') {
-    lines.pop();
-  }
-  if (lines.shift() !== FIELDS.join('\t')) {
-    throw new Error(`Ledger header must be: ${FIELDS.join(' ')}`);
-  }
-  const rows = lines.map((line, index) => {
-    const values = line.split('\t');
-    if (values.length !== FIELDS.length) {
-      throw new Error(`Ledger line ${index + 2}: expected ${FIELDS.length} fields, found ${values.length}`);
-    }
-    const row = Object.fromEntries(FIELDS.map((field, i) => [field, values[i]]));
-    validateRow(row, `Ledger line ${index + 2}`);
-    return row;
-  });
-  assertUniqueKeys(rows, 'Ledger');
-  return rows;
-}
-
-function formatLedger(rows) {
-  rows.forEach(row => validateRow(row, `Ledger row ${rowKey(row)}`));
-  assertUniqueKeys(rows, 'Ledger');
-  const sorted = rows.slice().sort(compareRows);
-  return [FIELDS.join('\t'), ...sorted.map(row => FIELDS.map(field => row[field]).join('\t'))].join('\n') + '\n';
-}
-
-function readLedger(file) {
-  return parseLedger(fs.readFileSync(file, 'utf8'));
-}
-
-function writeLedger(file, rows) {
-  fs.mkdirSync(path.dirname(file), {recursive: true});
-  fs.writeFileSync(file, formatLedger(rows));
-}
+const {parse: parseLedger, format: formatLedger, read: readLedger, write: writeLedger} = tsvLedger({
+  fields: FIELDS,
+  key: rowKey,
+  compare: compareRows,
+  validate: validateRow,
+  label: 'Ledger',
+});
 
 function isDevVersion({version}) {
   return /^dev-|-dev$/.test(version);
@@ -247,6 +208,13 @@ function metadataEntries(data, packageName, repoUrl) {
   });
 }
 
+// The versions of an include or p2 file, with the shasum as the sha1 of the archive
+function includeEntries(data, repoUrl) {
+  return Object.keys(data.packages || {})
+    .flatMap(name => metadataEntries(data, name, repoUrl))
+    .map(({shasum, ...entry}) => ({...entry, sha1: shasum}));
+}
+
 /**
  * Read every package version from the p2 metadata satis generated. Those are the files composer 2
  * resolves from, and the only ones it reads published-time from.
@@ -302,7 +270,7 @@ async function hashBuiltEntries(entries, packagesDir, incremental) {
   return mapConcurrent(entries, 8, async entry => {
     const file = path.join(packagesDir, entry.path);
     if (incremental && !fs.existsSync(file)) {
-      return {...entry, sha1: entry.shasum, sha256: '', built: false};
+      return {...entry, sha1: entry.shasum, sha256: '', fromMetadata: true};
     }
     return {...entry, ...(await hashFile(file))};
   });
@@ -337,13 +305,14 @@ async function readAliasTarget(zipFile) {
  */
 async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDiff = [], allowAliasRepoint = false, incremental = false, now = new Date()}) {
   const entries = await hashBuiltEntries(readSatisOutput(satisOutputDir, repoUrl), packagesDir, incremental);
-  const results = notBuiltProblems(classify(rows, entries, {expectDiff, now}));
+  const check = options => notBuiltProblems(classify(rows, entries, {expectDiff, now, ...options}));
+  const results = check();
   if (!allowAliasRepoint) {
     return results;
   }
   const aliasTargets = new Map();
   for (const {status, entry} of results) {
-    if (status === STATUS.MODIFIED && entry.built !== false) {
+    if (status === STATUS.MODIFIED && !entry.fromMetadata) {
       const alias = await readAliasTarget(path.join(packagesDir, entry.path));
       alias && aliasTargets.set(rowKey(entry), alias);
     }
@@ -354,14 +323,14 @@ async function verifyBuild(rows, {satisOutputDir, packagesDir, repoUrl, expectDi
   const composers = await mapConcurrent(
     entries.filter(entry => entry.path.startsWith('mage-os/')),
     8,
-    entry => entry.built === false ? entry : readComposerJsonFromZip(path.join(packagesDir, entry.path))
+    entry => entry.fromMetadata ? entry : readComposerJsonFromZip(path.join(packagesDir, entry.path))
   );
-  return notBuiltProblems(classify(rows, entries, {expectDiff, aliasTargets, replacers: newestReplacers(composers), now}));
+  return check({aliasTargets, replacers: newestReplacers(composers)});
 }
 
 function notBuiltProblems(results) {
   for (const {status, problems, entry} of results) {
-    if (entry && entry.built === false && status !== STATUS.UNCHANGED) {
+    if (entry && entry.fromMetadata && status !== STATUS.UNCHANGED) {
       problems.push(`${status} version has no archive in the build`);
     }
   }
@@ -409,16 +378,17 @@ async function fetchBaseMetadata(baseUrl, fetchText) {
  * @param {Array<Object>} rows Ledger rows
  * @param {Array<{file: String, text: String}>} files Result of fetchBaseMetadata()
  * @param {String} repoUrl The repository URL the dist urls are below
+ * @returns {{results: Array<Object>|null, failures: Array<String>}} results is null if the metadata can not be read
  */
 function baseMetadataFailures(rows, files, repoUrl) {
-  const entries = [];
-  for (const {text} of files.slice(1)) {
-    const data = JSON.parse(text);
-    for (const name of Object.keys(data.packages || {})) {
-      entries.push(...metadataEntries(data, name, repoUrl).map(({shasum, ...entry}) => ({...entry, sha1: shasum})));
-    }
+  let results;
+  try {
+    results = classify(rows, files
+      .filter(({file}) => file !== 'packages.json')
+      .flatMap(({text}) => includeEntries(JSON.parse(text), repoUrl)));
+  } catch (exception) {
+    return {results: null, failures: [exception.message || String(exception)]};
   }
-  const results = classify(rows, entries);
   const failures = gateFailures(results);
   const {new: unknown} = summarize(results);
   if (unknown > 0) {
@@ -687,28 +657,20 @@ function formatReport(results, {title, markdown = false, limit = Infinity} = {})
 async function fetchRepoEntries(repoUrl, fetchJson, {fromMetadataUrl = false} = {}) {
   const base = trailingSlash(repoUrl);
   const packages = await fetchJson(base + 'packages.json');
-  const toEntries = (data, name) => metadataEntries(data, name, base).map(({shasum, publishedTime, ...entry}) => ({
-    ...entry,
-    sha1: shasum,
-    ...(fromMetadataUrl ? {publishedTime} : {}),
-  }));
 
   if (!fromMetadataUrl) {
     const entries = [];
     for (const include of Object.keys(packages.includes || {})) {
-      const data = await fetchJson(base + include);
-      for (const name of Object.keys(data.packages || {})) {
-        entries.push(...toEntries(data, name));
-      }
+      entries.push(...includeEntries(await fetchJson(base + include), base).map(({publishedTime, ...entry}) => entry));
     }
     return entries;
   }
 
   const names = packages['available-packages'] || [];
   const perPackage = await mapConcurrent(names, 8, async name => {
-    const entries = toEntries(await fetchJson(`${base}p2/${name}.json`), name);
+    const entries = includeEntries(await fetchJson(`${base}p2/${name}.json`), base);
     try {
-      entries.push(...toEntries(await fetchJson(`${base}p2/${name}~dev.json`), name));
+      entries.push(...includeEntries(await fetchJson(`${base}p2/${name}~dev.json`), base));
     } catch (exception) {
       if (exception.status !== 404) {
         throw exception;

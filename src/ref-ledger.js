@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {tsvLedger} = require('./tsv-ledger');
 
 const FIELDS = ['instruction', 'tag', 'commit', 'fingerprint'];
 
@@ -30,6 +31,10 @@ function isRepeatableFailure(exception) {
 
 function refKey({instruction, tag}) {
   return `${instruction} ${tag}`;
+}
+
+function publishedKey(name, version) {
+  return `${name} ${version}`;
 }
 
 function compareRefs(a, b) {
@@ -55,52 +60,13 @@ function validateRef(row, context) {
   }
 }
 
-function assertUniqueRefs(rows, context) {
-  const seen = new Set();
-  for (const row of rows) {
-    if (seen.has(refKey(row))) {
-      throw new Error(`${context}: duplicate entry for ${refKey(row)}`);
-    }
-    seen.add(refKey(row));
-  }
-}
-
-function parseRefs(text) {
-  const lines = text.split('\n');
-  if (lines[lines.length - 1] === '') {
-    lines.pop();
-  }
-  if (lines.shift() !== FIELDS.join('\t')) {
-    throw new Error(`Ref ledger header must be: ${FIELDS.join(' ')}`);
-  }
-  const rows = lines.map((line, index) => {
-    const values = line.split('\t');
-    if (values.length !== FIELDS.length) {
-      throw new Error(`Ref ledger line ${index + 2}: expected ${FIELDS.length} fields, found ${values.length}`);
-    }
-    const row = Object.fromEntries(FIELDS.map((field, i) => [field, values[i]]));
-    validateRef(row, `Ref ledger line ${index + 2}`);
-    return row;
-  });
-  assertUniqueRefs(rows, 'Ref ledger');
-  return rows;
-}
-
-function formatRefs(rows) {
-  rows.forEach(row => validateRef(row, `Ref ledger row ${refKey(row)}`));
-  assertUniqueRefs(rows, 'Ref ledger');
-  const sorted = rows.slice().sort(compareRefs);
-  return [FIELDS.join('\t'), ...sorted.map(row => FIELDS.map(field => row[field]).join('\t'))].join('\n') + '\n';
-}
-
-function readRefs(file) {
-  return parseRefs(fs.readFileSync(file, 'utf8'));
-}
-
-function writeRefs(file, rows) {
-  fs.mkdirSync(path.dirname(file), {recursive: true});
-  fs.writeFileSync(file, formatRefs(rows));
-}
+const {parse: parseRefs, format: formatRefs, read: readRefs, write: writeRefs} = tsvLedger({
+  fields: FIELDS,
+  key: refKey,
+  compare: compareRefs,
+  validate: validateRef,
+  label: 'Ref ledger',
+});
 
 /**
  * Hash of everything in a build instruction that decides which packages its tags produce, functions by
@@ -137,7 +103,7 @@ function instructionFingerprint(instruction, composerRepoUrl) {
  * @returns {{rows: Array<Object>, recorded: Number, notPublished: Array<String>}}
  */
 function mergeRefs(rows, pending, ledgerRows) {
-  const published = new Set(ledgerRows.map(row => `${row.name} ${row.version}`));
+  const published = new Set(ledgerRows.map(row => publishedKey(row.name, row.version)));
   const merged = new Map(rows.map(row => [refKey(row), row]));
   const notPublished = [];
   let recorded = 0;
@@ -147,7 +113,7 @@ function mergeRefs(rows, pending, ledgerRows) {
     if (previous && previous.commit !== commit) {
       throw new Error(`Tag ${tag} of ${instruction} was recorded at ${previous.commit} and now points at ${commit}`);
     }
-    if (!versions.every(([name, version]) => published.has(`${name} ${version}`))) {
+    if (!versions.every(([name, version]) => published.has(publishedKey(name, version)))) {
       notPublished.push(refKey(row));
       continue;
     }
@@ -165,11 +131,33 @@ function mergeRefs(rows, pending, ledgerRows) {
  */
 function createRefRecorder({rows = [], skip = false, listRemoteTags, pendingFile = null}) {
   const pending = [];
+  const remotes = new Map();
+
+  /**
+   * Start listing the tags of the repositories the build will process, a few at a time. A failure
+   * surfaces when forInstruction() awaits the listing.
+   *
+   * @param {Array<String>} urls
+   */
+  function prefetch(urls, concurrency = 8) {
+    const lanes = Array.from({length: concurrency}, () => Promise.resolve());
+    [...new Set(urls)].filter(url => !remotes.has(url)).forEach((url, index) => {
+      const lane = index % concurrency;
+      const listing = lanes[lane].then(() => listRemoteTags(url));
+      lanes[lane] = listing.catch(() => {});
+      remotes.set(url, listing);
+    });
+  }
+
+  function remoteTagsOf(url) {
+    prefetch([url]);
+    return remotes.get(url);
+  }
 
   async function forInstruction(instruction, composerRepoUrl) {
     const key = instruction.key;
     const fingerprint = instructionFingerprint(instruction, composerRepoUrl);
-    const remote = await listRemoteTags(instruction.repoUrl);
+    const remote = await remoteTagsOf(instruction.repoUrl);
     const extraCommits = new Map(instruction.extraRefToRelease.map(extra => [extra.release, extra.ref]));
     const commitOf = tag => extraCommits.has(tag) ? extraCommits.get(tag) : remote.get(tag);
 
@@ -182,7 +170,7 @@ function createRefRecorder({rows = [], skip = false, listRemoteTags, pendingFile
       if (commit !== row.commit) {
         throw new Error(`Recorded tag ${row.tag} of ${key} moved from ${row.commit} to ${commit}`);
       }
-      if (row.fingerprint === fingerprint) {
+      if (skip && row.fingerprint === fingerprint) {
         trusted.add(row.tag);
       }
     }
@@ -200,7 +188,7 @@ function createRefRecorder({rows = [], skip = false, listRemoteTags, pendingFile
 
     return {
       remoteTags: () => [...remote.keys()],
-      isRecorded: tag => skip && trusted.has(tag),
+      isRecorded: tag => trusted.has(tag),
       built(tag, packages) {
         const {versions} = resultOf(tag);
         Object.entries(packages || {}).forEach(([name, version]) => versions.set(`${name} ${version}`, [name, version]));
@@ -225,7 +213,7 @@ function createRefRecorder({rows = [], skip = false, listRemoteTags, pendingFile
     };
   }
 
-  return {forInstruction};
+  return {forInstruction, prefetch};
 }
 
 module.exports = {
@@ -235,6 +223,7 @@ module.exports = {
   instructionFingerprint,
   isRepeatableFailure,
   mergeRefs,
+  publishedKey,
   parseRefs,
   readRefs,
   writeRefs,

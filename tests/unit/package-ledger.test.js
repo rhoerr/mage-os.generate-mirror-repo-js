@@ -938,8 +938,10 @@ describe('package-ledger', () => {
 
     it('rejects a version without dist, which is what a seed satis did not replace looks like', () => {
       const files = filesOf([{name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', 'published-time': TIME}]);
-      expect(() => sut.baseMetadataFailures(ledgerRows, files, REPO_URL))
-        .toThrow(/no dist/);
+      expect(sut.baseMetadataFailures(ledgerRows, files, REPO_URL)).toEqual({
+        results: null,
+        failures: [expect.stringMatching(/no dist/)],
+      });
     });
   });
 
