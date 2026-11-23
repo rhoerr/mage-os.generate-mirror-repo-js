@@ -67,20 +67,20 @@ function requireOption(name) {
   return options[name];
 }
 
-async function fetchJson(url) {
+async function fetchOk(url) {
   const response = await fetch(url);
   if (!response.ok) {
     throw Object.assign(new Error(`HTTP ${response.status} for ${url}`), {status: response.status});
   }
-  return response.json();
+  return response;
+}
+
+async function fetchJson(url) {
+  return (await fetchOk(url)).json();
 }
 
 async function fetchText(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} for ${url}`);
-  }
-  return response.text();
+  return (await fetchOk(url)).text();
 }
 
 function report(results, title) {
@@ -114,6 +114,7 @@ async function guard() {
 async function base() {
   const repoUrl = requireOption('repoUrl');
   const baseUrl = options.baseUrl || repoUrl;
+  const satisOutputDir = options.satisOutputDir || 'build';
   const rows = ledger.readLedger(options.ledger);
   let files;
   try {
@@ -137,8 +138,8 @@ async function base() {
       `The live metadata of ${baseUrl} does not match the ledger, so an incremental build can not be based on it. Deploy with full_rebuild`,
     ]);
   }
-  ledger.writeBaseMetadata(files, options.satisOutputDir || 'build');
-  console.log(`Wrote the live metadata of ${rows.length} versions to ${options.satisOutputDir || 'build'}`);
+  ledger.writeBaseMetadata(files, satisOutputDir);
+  console.log(`Wrote the live metadata of ${rows.length} versions to ${satisOutputDir}`);
 }
 
 async function seed() {

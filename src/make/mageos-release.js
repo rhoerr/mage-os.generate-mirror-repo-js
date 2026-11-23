@@ -77,13 +77,14 @@ if (upstreamRelease && ! mageosRelease) {
 
 const {refs: releaseRefs, pins: dependencyPins} = loadReleaseRefs(releaseRefsFile);
 
-if (options.ledger && !options.fullRebuild) {
+const skipPublished = options.ledger && !options.fullRebuild;
+if (skipPublished) {
   if (!skipAliases && !options.baseMetadata) {
     throw new Error('--ledger skips published packages the aliases are generated from, it needs --baseMetadata or --skipAliases');
   }
   setPublishedVersions(readLedger(options.ledger));
 }
-const baseVersions = options.ledger && !options.fullRebuild && !skipAliases
+const baseVersions = skipPublished && !skipAliases
   ? readIncludedVersions(options.baseMetadata)
   : null;
 

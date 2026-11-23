@@ -503,8 +503,9 @@ function isInAdditionalPackages(name, version) {
  * @returns {Promise: <{packageFilepath: String, files: {filepath:String, mtime: Date, contentBugger: Buffer, isExecutable: Boolean}}>}
  */
 async function createComposerJsonOnlyPackage(instruction, release, name, version, transform) {
-  if (isPublished(name, version || release.ref)) {
-    return {packageFilepath: archiveFilePath(name, version || release.ref), files: []};
+  const archiveVersion = version || release.ref;
+  if (isPublished(name, archiveVersion)) {
+    return {packageFilepath: archiveFilePath(name, archiveVersion), files: []};
   }
   const refComposerConfig = JSON.parse(await readComposerJson(instruction.repoUrl, '', release.ref));
 
