@@ -188,10 +188,8 @@ Run the workflow with `full_rebuild` to build everything, as before. Do that
   matches the ledger again, or fails the gate and shows what differs.
 - after fixing the generator for packages it could not build (see the ref ledger below)
 
-A re-run of a failed deploy checks against the ledger of the commit it started from. If the base metadata check of a
-re-run fails on versions that are not in the ledger, the failed run already uploaded its metadata. Start a new run
-instead, which checks against the ledger the failed run recorded. For a release, leave `mageos_release` empty, as the
-guard refuses a published release, and push a missing release tag from the working copies artifact.  
+Do not re-run a deploy that failed after its ledger was recorded: the re-run checks against the ledger of the commit
+it started from, and stamps the new versions with a new time. Start a new run instead (see below).  
 If the live metadata can not be fetched at all, retry the deploy.
 
 Previews always rebuild everything. Only one deploy per target runs at a time, since each one builds on what the
@@ -214,9 +212,10 @@ Things to know when running the `Build, deploy & check Mirror` and `Build, deplo
 - If the gate fails, fix the cause. Do not look for a way around it. If a published package has to change or go
   away on purpose, change its row in the ledger with a reviewed pull request, then deploy.
   The same goes for a wrong `published-time`.
-- If a deploy fails after the ledger was committed, the release is already in the ledger, so the
-  `mageos_release` guard refuses a new run. Re-run the jobs of the failed workflow run instead. A re-run checks out
-  the commit the run started from, and the ledger it records is the one already on the branch.
+- If a deploy fails after the ledger was committed, do not re-run the failed run. Its build stamps the new versions
+  with a new time, which conflicts with the recorded ledger. Start a new run, which uses the recorded ledger. For a
+  release, first push the release tag from the working copies artifact, then leave `mageos_release` empty, as the
+  guard refuses a published release.
 - The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
   installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
 
