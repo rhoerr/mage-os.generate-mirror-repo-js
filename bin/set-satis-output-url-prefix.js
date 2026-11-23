@@ -4,6 +4,7 @@
  * node bin/set-satis-output-url-prefix.js --satisOutputDir=/build/ --mirrorUrl=http://repo.mirror.host
  */
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const parseOptions = require('parse-options');
@@ -26,9 +27,13 @@ Options:
 }
 
 
-function writeJson(file, data) {
-  fs.writeFileSync(file + '~', Buffer.from(JSON.stringify(data, null, 2), 'utf8'));
+function writeFile(file, contents) {
+  fs.writeFileSync(file + '~', Buffer.from(contents, 'utf8'));
   fs.renameSync(file + '~', file);
+}
+
+function writeJson(file, data) {
+  writeFile(file, JSON.stringify(data, null, 2));
 }
 
 let satisOutputDir = options.satisOutputDir || '/build/';
@@ -58,6 +63,16 @@ function fixUrl(o) {
   }
 }
 
+// Satis puts published-time last for versions it reads from a zip, but not for those it takes from an include file
+function movePublishedTimeLast(version) {
+  if ('published-time' in version) {
+    const time = version['published-time'];
+    delete version['published-time'];
+    version['published-time'] = time;
+  }
+  return version;
+}
+
 function fixIncludeFileUrls(includeFileData) {
   const packageNames = Object.keys(includeFileData.packages || {});
 
@@ -67,6 +82,7 @@ function fixIncludeFileUrls(includeFileData) {
 
     data.packages[packageName] = packageVersions.reduce((newPackageAcc, version) => {
       fixUrl(newPackageAcc[version].dist);
+      movePublishedTimeLast(newPackageAcc[version]);
       return newPackageAcc;
     }, data.packages[packageName]);
 
@@ -75,11 +91,25 @@ function fixIncludeFileUrls(includeFileData) {
 }
 
 
-for (const includeFileName in (packages.includes || {})) {
+// Satis names the include file by the hash of its contents before the urls are fixed
+const includes = {};
+const replacedIncludeFiles = [];
+for (const [includeFileName, metadata] of Object.entries(packages.includes || {})) {
   const includeFile = path.join(satisOutputDir, includeFileName);
   const includeFileData = JSON.parse(fs.readFileSync(includeFile));
-  const newIncludeData = fixIncludeFileUrls(includeFileData);
-  writeJson(includeFile, newIncludeData);
+  const contents = JSON.stringify(fixIncludeFileUrls(includeFileData), null, 2);
+  const sha1 = crypto.createHash('sha1').update(contents).digest('hex');
+  const newIncludeFileName = metadata.sha1 ? includeFileName.replace(metadata.sha1, sha1) : includeFileName;
+  writeFile(path.join(satisOutputDir, newIncludeFileName), contents);
+  includes[newIncludeFileName] = {...metadata, sha1};
+  if (newIncludeFileName !== includeFileName) {
+    replacedIncludeFiles.push(includeFile);
+  }
+}
+if (packages.includes) {
+  packages.includes = includes;
+  writeFile(path.join(satisOutputDir, 'packages.json'), JSON.stringify(packages, null, 4) + '\n');
+  replacedIncludeFiles.forEach(file => fs.unlinkSync(file));
 }
 
 let packagePathTemplate = packages['metadata-url'];
@@ -100,7 +130,7 @@ for (const packageName of packages['available-packages']) {
 
     packageData.packages[packageName] = (packageData.packages[packageName] || []).map(packageRelease => {
       fixUrl(packageRelease.dist);
-      return packageRelease;
+      return movePublishedTimeLast(packageRelease);
     });
     writeJson(packageFilePath, packageData);
   }

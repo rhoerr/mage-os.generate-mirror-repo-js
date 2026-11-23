@@ -178,7 +178,7 @@ A production deploy only builds what the ledger does not have, and adds it to th
 3. Satis runs over the new archives only (`--repository-url`), and takes every other version from the live include file.
 4. The gate checks the versions that were not built by their metadata, and the new and repointed ones by their archive.
 
-The output is the same as a full build, apart from the order of keys in the metadata and the name of the include file.
+The metadata is byte for byte the same as that of a full build.
 
 Run the workflow with `full_rebuild` to build everything, as before. Do that
 
