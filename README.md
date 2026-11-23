@@ -164,7 +164,32 @@ The deploy workflow uses the ledger like this:
    `record ledger` job of the same workflow run, and waits until the ledger is on the branch.
 4. The zips are uploaded first, then the metadata (`include/`, `p2/`, `packages.json`), then the Cloudflare cache is
    purged. Both uploads compare checksums, so a second run sends no unchanged zip. Zips are never deleted from the
-   server. The `delete` input only removes stale metadata.
+   server. The `delete` input only removes stale metadata, after the new `packages.json` is uploaded.
+
+### Incremental production deploys
+
+A production deploy only builds what the ledger does not have, and adds it to the metadata the repository serves:
+
+1. `package-ledger.js base` fetches the live `packages.json` and its include file, and checks that they contain every
+   ledger version with the ledger's sha1, `metadata-sha256` and `published-time`, and no other version.
+2. The generator skips the versions in the ledger and the tags in the ref ledger. The release build generates the
+   `magento/*` aliases from the live metadata and the new packages, and only writes aliases that are new or now point
+   at a newer `mage-os/*` version.
+3. Satis runs over the new archives only (`--repository-url`), and takes every other version from the live include file.
+4. The gate checks the versions that were not built by their metadata, and the new and repointed ones by their archive.
+
+The output is the same as a full build, apart from the order of keys in the metadata and the name of the include file.
+
+Run the workflow with `full_rebuild` to build everything, as before. Do that
+
+- for the first production deploy of a repository, as its live metadata has no `published-time` yet
+- when the base metadata check fails. The live metadata then does not match the ledger: a deploy failed after the
+  ledger was recorded, someone changed the server, or a CDN served an old copy. A full rebuild uploads metadata that
+  matches the ledger again, or fails the gate and shows what differs.
+- after fixing the generator for packages it could not build (see the ref ledger below)
+
+Previews always rebuild everything. Only one deploy per target runs at a time, since each one builds on what the
+previous one uploaded.
 
 Deploys to the preview repositories use the ledger of the production repository and never change it. They always
 rebuild everything, deploy, and then fail the run if anything differs from the ledger, other than the project
@@ -196,6 +221,7 @@ The reusable `deploy.yml` workflow takes these inputs:
 | `ledger` | `''` | Name of the ledger file in `resource/ledger`, without `.tsv`. Empty skips all ledger steps |
 | `enforce_ledger` | `true` | Fail on violations and record new versions. `false` is for the preview repositories: report, deploy, then fail on differences |
 | `delete` | `true` | Remove stale metadata that is not in the build. The release workflow sets `false` |
+| `full_rebuild` | `false` | Build every package instead of adding the new ones to the live metadata. Only changes deploys with `enforce_ledger` |
 
 To compare what a repository currently serves against the ledger, run
 
@@ -222,7 +248,7 @@ The generators take these options for it:
 - `--fullRebuild` builds every version and tag; the recorded commits are still checked.
 
 A tag is recorded even if a package of it failed in a way that repeats on the same commit, a missing composer.json
-for example. After fixing the generator for such a case, run a full rebuild to build those packages.
+for example. After fixing the generator for such a case, deploy with `full_rebuild` to build those packages.
 
 ## Process of building a new mirror release
 
