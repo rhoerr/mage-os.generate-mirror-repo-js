@@ -115,22 +115,29 @@ async function base() {
   const repoUrl = requireOption('repoUrl');
   const baseUrl = options.baseUrl || repoUrl;
   const rows = ledger.readLedger(options.ledger);
+  let files;
+  try {
+    files = await ledger.fetchBaseMetadata(baseUrl, fetchText);
+  } catch (exception) {
+    return fail([
+      exception.message || String(exception),
+      `Could not fetch the live metadata of ${baseUrl}. Retry, or deploy with full_rebuild if the repository has no valid metadata`,
+    ]);
+  }
   let checked;
   try {
-    const files = await ledger.fetchBaseMetadata(baseUrl, fetchText);
-    checked = {files, ...ledger.baseMetadataFailures(rows, files, repoUrl)};
+    checked = ledger.baseMetadataFailures(rows, files, repoUrl);
+    report(checked.results, `Live metadata of ${baseUrl} against ${path.basename(options.ledger)}`);
   } catch (exception) {
     checked = {failures: [exception.message || String(exception)]};
   }
-  checked.results && report(checked.results, `Live metadata of ${baseUrl} against ${path.basename(options.ledger)}`);
   if (checked.failures.length > 0) {
-    fail([
+    return fail([
       ...checked.failures,
       `The live metadata of ${baseUrl} does not match the ledger, so an incremental build can not be based on it. Deploy with full_rebuild`,
     ]);
-    return;
   }
-  ledger.writeBaseMetadata(checked.files, options.satisOutputDir || 'build');
+  ledger.writeBaseMetadata(files, options.satisOutputDir || 'build');
   console.log(`Wrote the live metadata of ${rows.length} versions to ${options.satisOutputDir || 'build'}`);
 }
 

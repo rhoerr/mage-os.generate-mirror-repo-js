@@ -199,12 +199,21 @@ describe('bin/package-ledger.js', () => {
 
     it.each([
       ['a stale copy', () => served['/include/all$abc.json'] = JSON.stringify({packages: {}})],
-      ['a missing include file', () => delete served['/include/all$abc.json']],
+      ['a seed satis did not replace', () => served['/include/all$abc.json'] = JSON.stringify({packages: {[name]: {'2.0.0': {name, version: '2.0.0'}}}})],
     ])('fails on %s and points at full_rebuild', async (_, change) => {
       change();
       const result = await base();
       expect(result.status).toBe(1);
       expect(result.stdout).toContain('Deploy with full_rebuild');
+      expect(fs.existsSync(path.join(dir, 'build'))).toBe(false);
+    });
+
+    it('asks for a retry when the metadata can not be fetched', async () => {
+      delete served['/include/all$abc.json'];
+      const result = await base();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('HTTP 404');
+      expect(result.stdout).toContain('Retry');
       expect(fs.existsSync(path.join(dir, 'build'))).toBe(false);
     });
   });
