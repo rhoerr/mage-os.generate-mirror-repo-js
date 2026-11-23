@@ -147,39 +147,53 @@ The deploy workflow uses the ledger like this:
 1. Before satis runs, the `published-time` of every version in the ledger is seeded into the satis output directory.
    Satis keeps those, and stamps every version it has not seen before with the time of the build.
    Composer cooldown policies (`config.policy.cooldown`) depend on that time never changing for a published version.
-2. After satis ran, the build is compared to the ledger. A deploy to a production repository fails if
+2. After satis ran, the build is compared to the ledger (the gate). A deploy to a production repository fails if
    - an already published package has different contents, or is missing from the build
    - the `published-time` of an already published version is not the one in the ledger
    - a new version has no `published-time`, or one that is not the time of the build
 
-   New versions are fine. So is a `magento/*` alias metapackage of the release repository that changed because it
-   now requires a package version that is new in the same build.  
+   New versions are fine. There is no override flag.  
+   The one exception is a `magento/*` alias metapackage of the release repository. It may change if it is an alias
+   (it replaces a `mage-os/*` package of the same name) and now requires exactly the highest `mage-os/*` version that
+   replaces it anywhere in the build. It keeps its `published-time`, and the ledger row gets the new hashes.  
    The differences are listed in the summary of the workflow run.
 3. New versions are committed to the ledger before the packages are uploaded.
    If that commit can not be pushed, nothing is deployed.  
    The job building and uploading the packages can not push to this repository. It hands the updated ledger to the
    `record ledger` job of the same workflow run, and waits until the ledger is on the branch.
+4. The zips are uploaded first, then the metadata (`include/`, `p2/`, `packages.json`), then the Cloudflare cache is
+   purged. Both uploads compare checksums, so a second run sends no unchanged zip. Zips are never deleted from the
+   server. The `delete` input only removes stale metadata.
 
-Deploys to the preview repositories use the ledger of the production repository. They only report differences and
-never change the ledger. The project packages are expected to differ there, because they contain the repository URL.
+Deploys to the preview repositories use the ledger of the production repository and never change it. They always
+rebuild everything, deploy, and then fail the run if anything differs from the ledger, other than the project
+packages (they contain the repository URL). A preview of the mirror and of the release repository also runs weekly,
+as the test that the build still reproduces what was published.
+
+Checked before anything is built, for deploys with a ledger:
+
+- A production deploy of a `mageos_release` requires `publish_tag`.
+- `publish_tag` on a preview repository fails.
+- A `mageos_release` that is already in the ledger fails. Published releases are immutable.
 
 Things to know when running the `Build, deploy & check Mirror` and `Build, deploy & check Release` workflows:
 
 - Deploys to a production repository have to be run from the `main` branch, since that is where the ledger is updated.
-- If an already published package changed or went missing on purpose, check `allow_ledger_changes` to deploy anyway.
-  The changes are recorded in the ledger, in a commit that links to the workflow run.
-  This does not cover a changed `published-time`. To correct one, change it in the ledger with a pull request.
-- If a deploy fails after the ledger was committed, start a new workflow run. The versions keep the recorded
-  `published-time`. Re-running the failed run does not work, as it uses the ledger from before that commit.
+- If the gate fails, fix the cause. Do not look for a way around it. If a published package has to change or go
+  away on purpose, change its row in the ledger with a reviewed pull request, then deploy.
+  The same goes for a wrong `published-time`.
+- If a deploy fails after the ledger was committed, the release is already in the ledger, so the
+  `mageos_release` guard refuses a new run. Ask the maintainers how to proceed.
+- The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
+  installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
 
 The reusable `deploy.yml` workflow takes these inputs:
 
 | input | default | purpose |
 |---|---|---|
 | `ledger` | `''` | Name of the ledger file in `resource/ledger`, without `.tsv`. Empty skips all ledger steps |
-| `enforce_ledger` | `true` | Fail on violations and record new versions. `false` only reports, for the preview repositories |
-| `allow_ledger_changes` | `false` | Deploy and record changed or missing published packages |
-| `allow_ledger_alias_repoint` | `false` | Accept alias metapackages that changed to require a version new in the build |
+| `enforce_ledger` | `true` | Fail on violations and record new versions. `false` is for the preview repositories: report, deploy, then fail on differences |
+| `delete` | `true` | Remove stale metadata that is not in the build. The release workflow sets `false` |
 
 To compare what a repository currently serves against the ledger, run
 

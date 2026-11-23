@@ -19,7 +19,7 @@ on:
         default: '/var/www/preview-mirror.mage-os.org/html/'
         type: string
       delete:
-        description: 'Remove remote files that do not exist in the build'
+        description: 'Remove stale repository metadata (include/, p2/) that does not exist in the build. Zips are never removed'
         required: false
         default: true
         type: boolean
@@ -53,16 +53,6 @@ on:
         required: false
         default: true
         type: boolean
-      allow_ledger_changes:
-        description: 'Deploy and record changed or missing already published packages instead of failing'
-        required: false
-        default: false
-        type: boolean
-      allow_ledger_alias_repoint:
-        description: 'Accept changed alias metapackages that now require a package version published by this deploy'
-        required: false
-        default: false
-        type: boolean
 
     secrets:
       SERVER_SSH_KEY:
@@ -94,8 +84,7 @@ env:
   publish_tag: ${{ inputs.publish_tag }}
   ledger_file: ${{ inputs.ledger != '' && format('resource/ledger/{0}.tsv', inputs.ledger) || '' }}
   ledger_mode_arg: ${{ inputs.enforce_ledger && '--mode=gate --update' || '--mode=report --expectDiff="*/project-community-edition-*,*/project-minimal-edition-*"' }}
-  ledger_allow_changes_arg: ${{ inputs.allow_ledger_changes && '--allowChanges' || '' }}
-  ledger_alias_repoint_arg: ${{ inputs.allow_ledger_alias_repoint && '--allowAliasRepoint' || '' }}
+  ledger_alias_repoint_arg: ${{ inputs.ledger == 'release' && '--allowAliasRepoint' || '' }}
 
 jobs:
   deploy:
@@ -110,29 +99,28 @@ jobs:
           exit 1
         name: "Require the default branch to record to the package ledger"
         if: ${{ inputs.ledger != '' && inputs.enforce_ledger && github.ref_name != github.event.repository.default_branch }}
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: 8.3
-          tools: composer:2.7
       - uses: actions/setup-node@v3
         with:
           node-version: 20
           cache: 'npm'
+      - run: npm ci
+      - run: |
+          node bin/package-ledger.js guard --ledger="$ledger_file" --target=${{ inputs.enforce_ledger && 'production' || 'preview' }} \
+            --mageosRelease="${{ inputs.mageos_release }}" --publishTag=${{ inputs.publish_tag }}
+        name: "Check the deploy inputs against the ledger"
+        if: ${{ inputs.ledger != '' }}
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.4
+          tools: composer:v2
       - run: curl -L https://github.com/mage-os/php-dependency-list/raw/main/php-classes.phar -o /usr/local/bin/php-classes.phar && chmod +x /usr/local/bin/php-classes.phar
         name: "Install PHP source code dependency analyzer and make executable (used by nightly build script for base package)"
 
-      - run: npm ci
       - run: |
           node ${{ env.entrypoint }} --outputDir=build/packages --gitRepoDir=generate-repo/repositories --repoUrl="${{ env.repo }}" \
             ${{ env.mageos_release_arg }} ${{ env.upstream_release_arg }} ${{ env.release_refs_file_arg }}
         name: "Generate the packages for the composer repo"
 
-      # The packages above are generated with PHP 8.3 and composer 2.7. Satis requires PHP 8.4 and composer 2.11 or newer.
-      - uses: shivammathur/setup-php@v2
-        name: "Switch to the PHP version satis requires"
-        with:
-          php-version: 8.4
-          tools: composer:v2
       # Composer create-project and composer require have limited support for commit hashes, they check composer-plugin-api constraints
       # of the specified branch HEAD instead of the specified commit hash.
       #- run: composer create-project "composer/satis:dev-main#3827428ee5d46c12de269f0ffa13d40a0dacaee0"
@@ -162,7 +150,7 @@ jobs:
 
       - run: |
           node bin/package-ledger.js verify --ledger="${{ env.ledger_file }}" --satisOutputDir=build --repoUrl="${{ env.repo }}" \
-            ${{ env.ledger_mode_arg }} ${{ env.ledger_allow_changes_arg }} ${{ env.ledger_alias_repoint_arg }}
+            ${{ env.ledger_mode_arg }} ${{ env.ledger_alias_repoint_arg }}
         name: "Verify the packages against the ledger"
         if: ${{ inputs.ledger != '' }}
       # This job has no token that can push. The record-ledger.yml job of the same workflow run commits the ledger.
@@ -187,14 +175,25 @@ jobs:
         name: "Wait for the ledger to be recorded"
         if: ${{ inputs.ledger != '' && inputs.enforce_ledger }}
 
+      # The zips go first, so the metadata never points at a zip that is not on the server yet. Zips are never deleted.
       - uses: easingthemes/ssh-deploy@v4
-        name: "Rsync over SSH"
+        name: "Rsync the zips over SSH"
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
           REMOTE_HOST: ${{ secrets.REMOTE_HOST || env.remote_host }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           TARGET: ${{ env.remote_dir }}
-          ARGS: "--verbose --compress --recursive --links --times --omit-dir-times ${{ env.delete_arg }}"
+          ARGS: "--verbose --compress --recursive --links --times --omit-dir-times --checksum --prune-empty-dirs --include=*/ --include=*.zip --exclude=*"
+          SOURCE: "build/*"
+
+      - uses: easingthemes/ssh-deploy@v4
+        name: "Rsync the repository metadata over SSH"
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST || env.remote_host }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          TARGET: ${{ env.remote_dir }}
+          ARGS: "--verbose --compress --recursive --links --times --omit-dir-times --checksum --exclude=*.zip --exclude=/packages/ ${{ env.delete_arg }}"
           SOURCE: "build/*"
 
       - run: cd generate-repo && tar -cf ../release-build-working-copies-${{ env.mageos_release }}.tar repositories && cd ..
@@ -205,6 +204,7 @@ jobs:
         with:
           name: release-build-working-copies-${{ env.mageos_release }}
           path: release-build-working-copies-${{ env.mageos_release }}.tar
+          retention-days: 90
 
       - name: Purge Cloudflare cache for the repo metadata
         env:
@@ -227,3 +227,10 @@ jobs:
           # The root page can't be targeted by prefix without matching the whole host, and purge types can't be mixed per request.
           purge "{\"prefixes\":[\"$host/p2/\",\"$host/packages.json\"]}"
           purge "{\"files\":[\"https://$host/\",\"https://$host/index.html\"]}"
+
+      # A preview must reproduce the ledger apart from the project packages. The run only fails here, after the deploy.
+      - run: |
+          node bin/package-ledger.js verify --ledger="$ledger_file" --satisOutputDir=build --repoUrl="$repo" \
+            --mode=gate --expectDiff="*/project-community-edition-*,*/project-minimal-edition-*" ${{ env.ledger_alias_repoint_arg }}
+        name: "Fail the preview if it differs from the ledger"
+        if: ${{ inputs.ledger != '' && !inputs.enforce_ledger }}
