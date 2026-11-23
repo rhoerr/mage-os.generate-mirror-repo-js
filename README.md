@@ -183,7 +183,8 @@ Things to know when running the `Build, deploy & check Mirror` and `Build, deplo
   away on purpose, change its row in the ledger with a reviewed pull request, then deploy.
   The same goes for a wrong `published-time`.
 - If a deploy fails after the ledger was committed, the release is already in the ledger, so the
-  `mageos_release` guard refuses a new run. Ask the maintainers how to proceed.
+  `mageos_release` guard refuses a new run. Re-run the jobs of the failed workflow run instead. A re-run checks out
+  the commit the run started from, and the ledger it records is the one already on the branch.
 - The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
   installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
 
