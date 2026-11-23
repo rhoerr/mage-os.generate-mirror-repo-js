@@ -188,10 +188,8 @@ Run the workflow with `full_rebuild` to build everything, as before. Do that
   matches the ledger again, or fails the gate and shows what differs.
 - after fixing the generator for packages it could not build (see the ref ledger below)
 
-A re-run of a failed deploy checks against the ledger of the commit it started from. If the base metadata check of a
-re-run fails on versions that are not in the ledger, the failed run already uploaded its metadata. Start a new run
-instead, which checks against the ledger the failed run recorded. For a release, leave `mageos_release` empty, as the
-guard refuses a published release, and push a missing release tag from the working copies artifact.  
+Do not re-run a deploy that failed after its ledger was recorded: the re-run checks against the ledger of the commit
+it started from, and stamps the new versions with a new time. Start a new run instead (see below).  
 If the live metadata can not be fetched at all, retry the deploy.
 
 Previews always rebuild everything. Only one deploy per target runs at a time, since each one builds on what the
