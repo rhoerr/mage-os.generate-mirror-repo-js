@@ -796,6 +796,44 @@ describe('package-ledger', () => {
 
       expect(sut.summarize(sut.classify(rows, live))).toMatchObject({unchanged: 1, modified: 1, new: 1, missing: 1});
     });
+
+    it.each(['../all.json', '/etc/all.json'])('does not fetch the include file %s outside of the repository', async include => {
+      const fetchJson = fakeFetch({[`${REPO_URL}packages.json`]: {includes: {[include]: {sha1: 'abc'}}}});
+      await expect(sut.fetchRepoEntries(REPO_URL, fetchJson)).rejects.toThrow(/outside/);
+      expect(fetchJson).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('packagesJsonProblems', () => {
+    const SATIS = {
+      packages: [],
+      includes: {'include/all$0123456789abcdef0123456789abcdef01234567.json': {sha1: '0123456789abcdef0123456789abcdef01234567'}},
+      'metadata-url': '/p2/%package%.json',
+      'available-packages': ['acme/alpha', 'acme/beta'],
+    };
+
+    it('accepts what satis writes', () => {
+      expect(sut.packagesJsonProblems(SATIS, 'https://repo.example.com')).toEqual([]);
+      expect(sut.packagesJsonProblems({...SATIS, 'metadata-url': '/sub/p2/%package%.json'}, 'https://repo.example.com/sub/')).toEqual([]);
+    });
+
+    it.each([
+      ['providers', {'providers-url': '/p/%package%$%hash%.json', providers: {}}, ['packages.json: unexpected providers-url', 'packages.json: unexpected providers']],
+      ['repositories', {repositories: [{type: 'vcs', url: 'https://evil.example.com/repo.git'}]}, ['packages.json: unexpected repositories']],
+      ['inline packages', {packages: {'acme/alpha': {'6.6.6': {}}}}, ['packages.json: packages is not empty']],
+      ['another metadata-url', {'metadata-url': 'https://evil.example.com/p2/%package%.json'}, ['packages.json: metadata-url is "https://evil.example.com/p2/%package%.json", not "/p2/%package%.json"']],
+      ['an include file above the repository', {includes: {'../all.json': {}}}, ['packages.json: include file outside of the repository: ../all.json']],
+      ['an absolute include file', {includes: {'/all.json': {}}}, ['packages.json: include file outside of the repository: /all.json']],
+      ['includes that are no object', {includes: ['include/all.json']}, ['packages.json: includes is not an object']],
+      ['available-packages that are no list', {'available-packages': {'acme/alpha': true}}, ['packages.json: available-packages is not a list of package names']],
+    ])('rejects %s', (_, change, problems) => {
+      expect(sut.packagesJsonProblems({...SATIS, ...change}, REPO_URL)).toEqual(problems);
+    });
+
+    it('rejects anything but an object', () => {
+      expect(sut.packagesJsonProblems([], REPO_URL)).toEqual(['packages.json is not an object']);
+      expect(sut.packagesJsonProblems(null, REPO_URL)).toEqual(['packages.json is not an object']);
+    });
   });
 
   describe('bootstrapRows', () => {
@@ -894,7 +932,7 @@ describe('package-ledger', () => {
     });
 
     it('fails on a changed archive or published-time', () => {
-      expect(failuresOf([metadataOf(ledgerRows[0], {dist: {url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: sha1('x')}}), metadataOf(ledgerRows[1])]))
+      expect(failuresOf([metadataOf(ledgerRows[0], {dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: sha1('x')}}), metadataOf(ledgerRows[1])]))
         .toEqual(['1 already published version(s) modified']);
       expect(failuresOf([metadataOf(ledgerRows[0], {'published-time': '2025-01-01T00:00:00+00:00'}), metadataOf(ledgerRows[1])]))
         .toEqual(['1 version(s) with a published-time or shasum problem']);
@@ -934,6 +972,40 @@ describe('package-ledger', () => {
       expect(fs.readFileSync(path.join(dir, 'include/all$abc.json'), 'utf8')).toBe(files[1].text);
       expect(sut.readIncludedVersions(dir).map(v => v.version)).toEqual(['1.0.0', '1.1.0']);
       expect(() => sut.writeBaseMetadata(files, dir)).toThrow(/already exists/);
+    });
+
+    it('accepts every field satis writes for the packages built here', () => {
+      const full = metadataOf(ledgerRows[0], {
+        require: {'php': '~8.3.0'}, 'require-dev': {'acme/test': '*'}, replace: {'acme/old': '*'}, provide: {'acme/api': '1.0'},
+        conflict: {'acme/bad': '*'}, suggest: {'acme/extra': 'More'}, type: 'magento2-module',
+        autoload: {'psr-4': {'Acme\\Alpha\\': ''}}, 'autoload-dev': {'psr-4': {'Acme\\Alpha\\Test\\': 'Test/'}},
+        extra: {map: [['a', 'b']]}, bin: ['bin/alpha'], license: ['OSL-3.0'], description: 'Alpha', abandoned: true,
+        scripts: {test: 'phpunit'}, authors: [{name: 'Acme'}], support: {issues: 'https://acme.example.com'},
+        archive: {exclude: ['/Test']}, homepage: 'https://acme.example.com', keywords: ['alpha'],
+      });
+      const rows = [{...ledgerRows[0], 'metadata-sha256': sut.metadataSha256(full)}, ledgerRows[1]];
+      expect(sut.baseMetadataFailures(rows, filesOf([full, metadataOf(ledgerRows[1])]), REPO_URL).failures).toEqual([]);
+    });
+
+    it.each([
+      ['a source composer falls back to', {source: {type: 'git', url: 'https://evil.example.com/alpha.git', reference: 'main'}}, /unexpected source$/],
+      ['an include-path', {'include-path': ['../../evil']}, /unexpected include-path$/],
+      ['transport-options', {'transport-options': {ssl: {verify_peer: false}}}, /unexpected transport-options$/],
+      ['a notification-url', {'notification-url': 'https://evil.example.com/notify'}, /unexpected notification-url$/],
+      ['a dist reference', {dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: ledgerRows[0].sha1, reference: 'abc'}}, /unexpected dist reference$/],
+      ['dist mirrors', {dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: ledgerRows[0].sha1, mirrors: [{url: 'https://evil.example.com/%package%', preferred: true}]}}, /unexpected dist mirrors$/],
+      ['a dist type other than zip', {dist: {type: 'tar', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: ledgerRows[0].sha1}}, /dist type "tar" is not zip$/],
+    ])('rejects a version with %s', (_, extra, message) => {
+      expect(sut.baseMetadataFailures(ledgerRows, filesOf([metadataOf(ledgerRows[0], extra), metadataOf(ledgerRows[1])]), REPO_URL)).toEqual({
+        results: null,
+        failures: [expect.stringMatching(message)],
+      });
+    });
+
+    it('fails on a packages.json satis did not write', () => {
+      const [packagesJson, include] = filesOf(ledgerRows.map(r => metadataOf(r)));
+      const tampered = {file: 'packages.json', text: JSON.stringify({...JSON.parse(packagesJson.text), 'providers-url': '/p/%package%$%hash%.json'})};
+      expect(sut.baseMetadataFailures(ledgerRows, [tampered, include], REPO_URL).failures).toEqual(['packages.json: unexpected providers-url']);
     });
 
     it('rejects a version without dist, which is what a seed satis did not replace looks like', () => {

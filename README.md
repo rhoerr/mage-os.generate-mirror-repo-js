@@ -152,6 +152,8 @@ The deploy workflow uses the ledger like this:
    - an already published package has different contents, or is missing from the build
    - the `published-time` of an already published version is not the one in the ledger
    - a new version has no `published-time`, or one that is not the time of the build
+   - `packages.json` or a version has anything satis does not write for these packages, a `source` say, or a `dist`
+     other than a zip with url and shasum
 
    New versions are fine. There is no override flag.  
    The one exception is a `magento/*` alias metapackage of the release repository. It may change if it is an alias
@@ -171,7 +173,8 @@ The deploy workflow uses the ledger like this:
 A production deploy only builds what the ledger does not have, and adds it to the metadata the repository serves:
 
 1. `package-ledger.js base` fetches the live `packages.json` and its include file, and checks that they contain every
-   ledger version with the ledger's sha1, `metadata-sha256` and `published-time`, and no other version.
+   ledger version with the ledger's sha1, `metadata-sha256` and `published-time`, no other version, and nothing
+   satis does not write.
 2. The generator skips the versions in the ledger and the tags in the ref ledger. The release build generates the
    `magento/*` aliases from the live metadata and the new packages, and only writes aliases that are new or now point
    at a newer `mage-os/*` version.
@@ -214,8 +217,9 @@ Things to know when running the `Build, deploy & check Mirror` and `Build, deplo
   The same goes for a wrong `published-time`.
 - If a deploy fails after the ledger was committed, do not re-run the failed run. Its build stamps the new versions
   with a new time, which conflicts with the recorded ledger. Start a new run, which uses the recorded ledger. For a
-  release, first push the release tag from the working copies artifact, then leave `mageos_release` empty, as the
-  guard refuses a published release.
+  release, first run the `push-release-tag.yml` workflow with the release and the id of the failed run, which pushes
+  the tag from that run's working copies artifact. Then leave `mageos_release` empty in the new run, as the guard
+  refuses a published release, and set `full_rebuild`, as the live metadata does not have the recorded versions.
 - The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
   installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
 
@@ -378,7 +382,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="309" src="https://github.com/user-attachments/assets/34e2d5cf-175b-4f7a-98c4-26d2fc460e9e" />
 
 **Important**:
-- select the "preview" URL/folder in the first two combobox
+- select the "preview" URL in the first combobox
 - fill the version numbers and **do not** check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://preview-repo.mage-os.org and check that everything is ok, you should also
@@ -394,7 +398,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="310" src="https://github.com/user-attachments/assets/e6ae22f7-ad77-4017-a9ac-74224e14b82b" />
 
 **Important**:
-- select the production URL/folder in the first two combobox (the ones without the "preview" prefix)
+- select the production URL in the first combobox (the one without the "preview" prefix)
 - fill the version numbers and check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://repo.mage-os.org and check that everything is ok, you should also

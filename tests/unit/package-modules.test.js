@@ -1072,6 +1072,34 @@ describe('createPackagesForRef', () => {
     expect(result).toHaveProperty('magento/module-customer');
   });
 
+  it('reports the failure of each module and builds the others', async () => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const failure = 'Error executing git show: fatal: unable to access';
+    repo.listFolders.mockResolvedValue([
+      'app/code/Magento/Catalog',
+      'app/code/Magento/Customer',
+    ]);
+    repo.listFiles.mockResolvedValue([
+      { filepath: 'Model/Test.php', contentBuffer: Buffer.from('<?php'), isExecutable: false },
+    ]);
+    repo.readFile.mockImplementation(async (url, filepath) => {
+      if (filepath.includes('Customer')) {
+        throw failure;
+      }
+      return Buffer.from(JSON.stringify({name: 'magento/module-catalog', version: '103.0.5'}));
+    });
+    const onModuleFailure = jest.fn();
+
+    const result = await sut.createPackagesForRef(
+      createMockInstruction(), createMockPackage({ dir: 'app/code/Magento' }), createMockRelease(), onModuleFailure
+    );
+
+    expect(Object.keys(result)).toEqual(['magento/module-catalog']);
+    expect(onModuleFailure.mock.calls).toEqual([[failure]]);
+    expect(log).toHaveBeenCalledWith(failure);
+    log.mockRestore();
+  });
+
   it('should exclude directories matching excludes pattern', async () => {
     repo.listFolders.mockResolvedValue([
       'app/code/Magento/Catalog',

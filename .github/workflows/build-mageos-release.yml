@@ -14,14 +14,6 @@ on:
         options:
           - https://preview-repo.mage-os.org/
           - https://repo.mage-os.org/
-      remote_dir:
-        description: 'The deploy target directory on the repo host'
-        required: true
-        default: '/var/www/preview-repo.mage-os.org/html/'
-        type: choice
-        options:
-          - /var/www/preview-repo.mage-os.org/html/
-          - /var/www/repo.mage-os.org/html/
       mageos_release:
         description: 'New Mage-OS version (e.g. 1.0.0)'
         required: false
@@ -52,7 +44,7 @@ on:
 # mid-deploy or mid-tag-push. The target is production whenever the ledger is recorded, as each
 # production build adds to the metadata the previous one uploaded.
 concurrency:
-  group: ${{ github.workflow }}-${{ (inputs.repo == 'https://repo.mage-os.org/' || inputs.remote_dir == '/var/www/repo.mage-os.org/html/') && 'production' || 'preview' }}
+  group: ${{ github.workflow }}-${{ inputs.repo == 'https://repo.mage-os.org/' && 'production' || 'preview' }}
   cancel-in-progress: false
 
 jobs:
@@ -64,7 +56,7 @@ jobs:
       contents: read
     with:
       repo: ${{ inputs.repo || 'https://preview-repo.mage-os.org/' }}
-      remote_dir: ${{ inputs.remote_dir || '/var/www/preview-repo.mage-os.org/html/' }}
+      remote_dir: ${{ inputs.repo == 'https://repo.mage-os.org/' && '/var/www/repo.mage-os.org/html/' || '/var/www/preview-repo.mage-os.org/html/' }}
       entrypoint: src/make/mageos-release.js
       delete: false
       mageos_release: ${{ inputs.mageos_release }}
@@ -72,7 +64,7 @@ jobs:
       publish_tag: ${{ inputs.publish_tag == true }}
       release_refs_file: ${{ inputs.release_refs_file }}
       ledger: release
-      enforce_ledger: ${{ inputs.repo == 'https://repo.mage-os.org/' || inputs.remote_dir == '/var/www/repo.mage-os.org/html/' }}
+      enforce_ledger: ${{ inputs.repo == 'https://repo.mage-os.org/' }}
       full_rebuild: ${{ inputs.full_rebuild == true }}
 
     secrets:
@@ -84,7 +76,7 @@ jobs:
   record-ledger:
     uses: ./.github/workflows/record-ledger.yml
     name: "record ledger"
-    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) && (inputs.repo == 'https://repo.mage-os.org/' || inputs.remote_dir == '/var/www/repo.mage-os.org/html/') }}
+    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) && inputs.repo == 'https://repo.mage-os.org/' }}
     permissions:
       contents: write
       actions: read
@@ -118,6 +110,8 @@ jobs:
     if: ${{ success() && inputs.mageos_release && inputs.publish_tag }}
     needs: [ deploy, record-ledger ]
     uses: ./.github/workflows/push-release-tag.yml
+    permissions:
+      actions: read
     with:
       mageos_release: ${{ inputs.mageos_release }}
 
