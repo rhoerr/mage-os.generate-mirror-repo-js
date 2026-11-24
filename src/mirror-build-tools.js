@@ -133,7 +133,8 @@ async function createPackagesSinceTag(instruction, pkg, refs) {
     await buildTag(refs, tag, built, () => createPackagesForRef(
       instruction,
       pkg,
-      release
+      release,
+      exception => refs.failed(tag, exception)
     ));
   }
   return built;

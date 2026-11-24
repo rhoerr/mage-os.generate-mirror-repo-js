@@ -751,9 +751,10 @@ async function findModulesToBuild(instruction, pkg, ref) {
  * @param {repositoryBuildDefinition} instruction
  * @param {packageDefinition} pkg
  * @param {buildState} release
+ * @param {function(*): void} onModuleFailure Gets the exception of each module that failed to build
  * @returns {Promise<{}>}
  */
-async function createPackagesForRef(instruction, pkg, release) {
+async function createPackagesForRef(instruction, pkg, release, onModuleFailure = () => {}) {
   const modules = await findModulesToBuild(instruction, pkg, release.ref);
 
   report(`Found ${modules.length} modules`);
@@ -774,7 +775,8 @@ async function createPackagesForRef(instruction, pkg, release) {
       const packageToVersion = await createPackageForRef(instruction, subpackage, release);
       Object.assign(built, packageToVersion);
     } catch (exception) {
-      report(exception.message);
+      report(exception.message || exception);
+      onModuleFailure(exception);
     }
   }
   if (Object.keys(built).length === 0) {

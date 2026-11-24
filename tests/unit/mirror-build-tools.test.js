@@ -14,6 +14,7 @@ const {
   isPublished,
   isPublishedArchive
 } = require('../../src/package-modules');
+const {createRefRecorder} = require('../../src/ref-ledger');
 const JSZip = require('jszip');
 
 // Mock all dependencies
@@ -1027,6 +1028,68 @@ describe('mirror-build-tools', () => {
       expect(refRecorder.refs.built).toHaveBeenCalledWith('2.0.0', {'magento/module-a': '2.0.0'});
       expect(refRecorder.refs.failed).toHaveBeenCalledWith('2.1.0', failure);
       expect(refRecorder.refs.done).toHaveBeenCalled();
+    });
+
+    describe('with module failures', () => {
+      const TAGS = ['1.0.0', '2.0.0', '2.1.0'];
+      const GIT_FAILURE = 'Error executing git show: fatal: unable to access';
+
+      async function pendingTags(buildModules) {
+        createPackagesForRef.mockImplementation((_, __, release, onModuleFailure) => buildModules(release.ref, onModuleFailure));
+        const refRecorder = createRefRecorder({
+          listRemoteTags: async () => new Map(TAGS.map((tag, index) => [tag, String(index).repeat(40)])),
+          pendingFile: '/pending.json',
+        });
+
+        await sut.processMirrorInstruction(instruction(), {composerRepoUrl: 'https://repo.test/'}, refRecorder);
+
+        const [, pending] = fs.writeFileSync.mock.calls.find(([file]) => file === '/pending.json');
+        return Object.fromEntries(JSON.parse(pending).map(({tag, versions}) => [tag, versions]));
+      }
+
+      test('does not record a tag a module of which failed in a way that may not happen again', async () => {
+        const pending = await pendingTags(async (tag, onModuleFailure) => {
+          if (tag === '2.0.0') {
+            onModuleFailure(GIT_FAILURE);
+          }
+          return {'magento/module-a': tag};
+        });
+
+        expect(pending).toEqual({'1.0.0': [['magento/module-a', '1.0.0']], '2.1.0': [['magento/module-a', '2.1.0']]});
+        expect(console.log).toHaveBeenCalledWith('Modules', TAGS);
+      });
+
+      test('does not record a tag all modules of which failed in a way that may not happen again', async () => {
+        const pending = await pendingTags(async (tag, onModuleFailure) => {
+          if (tag === '2.0.0') {
+            onModuleFailure(GIT_FAILURE);
+            onModuleFailure(GIT_FAILURE);
+            throw {message: `No packages built for ${tag}`};
+          }
+          return {'magento/module-a': tag};
+        });
+
+        expect(Object.keys(pending)).toEqual(['1.0.0', '2.1.0']);
+      });
+
+      test('records a tag a module of which the generator rejected', async () => {
+        const pending = await pendingTags(async (tag, onModuleFailure) => {
+          if (tag === '2.0.0') {
+            onModuleFailure({message: 'Unable to find composer.json for 2.0.0, skipping Magento/b'});
+          }
+          if (tag === '2.1.0') {
+            onModuleFailure({message: 'Unable to find composer.json for 2.1.0, skipping Magento/b'});
+            throw {message: `No packages built for ${tag}`};
+          }
+          return {'magento/module-a': tag};
+        });
+
+        expect(pending).toEqual({
+          '1.0.0': [['magento/module-a', '1.0.0']],
+          '2.0.0': [['magento/module-a', '2.0.0']],
+          '2.1.0': [],
+        });
+      });
     });
 
     test('does not clone or tag a repository whose tags are all recorded', async () => {
