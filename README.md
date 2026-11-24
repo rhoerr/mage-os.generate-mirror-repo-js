@@ -326,7 +326,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="309" src="https://github.com/user-attachments/assets/34e2d5cf-175b-4f7a-98c4-26d2fc460e9e" />
 
 **Important**:
-- select the "preview" URL/folder in the first two combobox
+- select the "preview" URL in the first combobox
 - fill the version numbers and **do not** check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://preview-repo.mage-os.org and check that everything is ok, you should also
@@ -342,7 +342,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="310" src="https://github.com/user-attachments/assets/e6ae22f7-ad77-4017-a9ac-74224e14b82b" />
 
 **Important**:
-- select the production URL/folder in the first two combobox (the ones without the "preview" prefix)
+- select the production URL in the first combobox (the one without the "preview" prefix)
 - fill the version numbers and check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://repo.mage-os.org and check that everything is ok, you should also
