@@ -1,0 +1,11 @@
+{
+  "require": {
+    "adobe-commerce/os-extensions-metapackage": "1.0.1-beta2",
+    "magento/inventory-metapackage": "1.2.8-beta2",
+    "magento/laminas-captcha": "1.0.0-beta2",
+    "magento/laminas-crypt": "1.0.0-beta2",
+    "magento/oauth": "1.0.0-beta2",
+    "magento/page-builder": "1.7.5-beta2",
+    "magento/security-package": "1.1.7-beta2"
+  }
+}

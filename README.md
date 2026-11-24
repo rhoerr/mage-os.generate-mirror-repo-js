@@ -134,6 +134,79 @@ Tests run automatically on pull requests via GitHub Actions.
 docker build -t magece/mirror-repo-js .
 ```
 
+## Package ledger
+
+`resource/ledger/mirror.tsv` and `resource/ledger/release.tsv` record every package version published to
+https://mirror.mage-os.org and https://repo.mage-os.org. There is one line per version, with the archive path, its sha1
+and sha256, the `published-time` served to composer, and the source of that time: `build` for versions recorded by a
+deploy, or `upstream`, `tag`, `release` and `bootstrap` for versions published before the ledger existed.  
+The nightly repositories have no ledger.
+
+The deploy workflow uses the ledger like this:
+
+1. Before satis runs, the `published-time` of every version in the ledger is seeded into the satis output directory.
+   Satis keeps those, and stamps every version it has not seen before with the time of the build.
+   Composer cooldown policies (`config.policy.cooldown`) depend on that time never changing for a published version.
+2. After satis ran, the build is compared to the ledger (the gate). A deploy to a production repository fails if
+   - an already published package has different contents, or is missing from the build
+   - the `published-time` of an already published version is not the one in the ledger
+   - a new version has no `published-time`, or one that is not the time of the build
+
+   New versions are fine. There is no override flag.  
+   The one exception is a `magento/*` alias metapackage of the release repository. It may change if it is an alias
+   (it replaces a `mage-os/*` package of the same name) and now requires exactly the highest `mage-os/*` version that
+   replaces it anywhere in the build. It keeps its `published-time`, and the ledger row gets the new hashes.  
+   The differences are listed in the summary of the workflow run.
+3. New versions are committed to the ledger before the packages are uploaded.
+   If that commit can not be pushed, nothing is deployed.  
+   The job building and uploading the packages can not push to this repository. It hands the updated ledger to the
+   `record ledger` job of the same workflow run, and waits until the ledger is on the branch.
+4. The zips are uploaded first, then the metadata (`include/`, `p2/`, `packages.json`), then the Cloudflare cache is
+   purged. Both uploads compare checksums, so a second run sends no unchanged zip. Zips are never deleted from the
+   server. The `delete` input only removes stale metadata.
+
+Deploys to the preview repositories use the ledger of the production repository and never change it. They always
+rebuild everything, deploy, and then fail the run if anything differs from the ledger, other than the project
+packages (they contain the repository URL). A preview of the mirror and of the release repository also runs weekly,
+as the test that the build still reproduces what was published.
+
+Checked before anything is built, for deploys with a ledger:
+
+- A production deploy of a `mageos_release` requires `publish_tag`.
+- `publish_tag` on a preview repository fails.
+- A `mageos_release` that is already in the ledger fails. Published releases are immutable.
+
+Things to know when running the `Build, deploy & check Mirror` and `Build, deploy & check Release` workflows:
+
+- Deploys to a production repository have to be run from the `main` branch, since that is where the ledger is updated.
+- If the gate fails, fix the cause. Do not look for a way around it. If a published package has to change or go
+  away on purpose, change its row in the ledger with a reviewed pull request, then deploy.
+  The same goes for a wrong `published-time`.
+- If a deploy fails after the ledger was committed, do not re-run the failed run. Its build stamps the new versions
+  with a new time, which conflicts with the recorded ledger. Start a new run, which uses the recorded ledger. For a
+  release, first run the `push-release-tag.yml` workflow with the release and the id of the failed run, which pushes
+  the tag from that run's working copies artifact. Then leave `mageos_release` empty in the new run, as the guard
+  refuses a published release.
+- The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
+  installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
+
+The reusable `deploy.yml` workflow takes these inputs:
+
+| input | default | purpose |
+|---|---|---|
+| `ledger` | `''` | Name of the ledger file in `resource/ledger`, without `.tsv`. Empty skips all ledger steps |
+| `enforce_ledger` | `true` | Fail on violations and record new versions. `false` is for the preview repositories: report, deploy, then fail on differences |
+| `delete` | `true` | Remove stale metadata that is not in the build. The release workflow sets `false` |
+
+To compare what a repository currently serves against the ledger, run
+
+```sh
+node bin/package-ledger.js audit --ledger=resource/ledger/mirror.tsv --repoUrl=https://mirror.mage-os.org/
+```
+
+This checks the version list, the sha1 checksums and the download URLs. Add `--checkTimes` to also check the
+metadata files composer 2 reads, including each `published-time`.
+
 ## Process of building a new mirror release
 
 A new mirror release gets created when Magento releases a new version.  
@@ -192,6 +265,8 @@ For a practical example [check this PR](https://github.com/mage-os/github-action
   cp ../mageos-magento2-base-composer-json/2.4.7-p4/product-community-edition/composer.json resource/history/magento/product-community-edition/2.4.7-p4.json
   cp ../mageos-magento2-base-composer-json/2.4.7-p4/project-community-edition/composer.json resource/history/magento/project-community-edition/2.4.7-p4.json
   ```
+  The mirror build does not build `magento/product-community-edition` for a tag without a file in
+  `resource/history/magento/product-community-edition/`, and logs the missing file, so the version is published once the file is added.
 - "Build" the mirror with  
   `rm -rf repositories; node src/make/mirror.js --outputDir=build`
 - Download all missing packages with  
@@ -253,7 +328,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="309" src="https://github.com/user-attachments/assets/34e2d5cf-175b-4f7a-98c4-26d2fc460e9e" />
 
 **Important**:
-- select the "preview" URL/folder in the first two combobox
+- select the "preview" URL in the first combobox
 - fill the version numbers and **do not** check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://preview-repo.mage-os.org and check that everything is ok, you should also
@@ -269,7 +344,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="310" src="https://github.com/user-attachments/assets/e6ae22f7-ad77-4017-a9ac-74224e14b82b" />
 
 **Important**:
-- select the production URL/folder in the first two combobox (the ones without the "preview" prefix)
+- select the production URL in the first combobox (the one without the "preview" prefix)
 - fill the version numbers and check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://repo.mage-os.org and check that everything is ok, you should also

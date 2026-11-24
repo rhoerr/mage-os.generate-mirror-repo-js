@@ -1,0 +1,73 @@
+name: "[workflow call] Record deployed packages in the package ledger"
+
+# Runs next to the deploy.yml job of the same workflow run, which hands over the ledger as an artifact once the
+# build passed verification, and uploads the packages only after the ledger is on the branch.
+#
+# This is the only job with a token that can push to the repository. Do not add steps running third-party
+# actions or code that is downloaded at run time.
+
+on:
+  workflow_call:
+    inputs:
+      ledger:
+        description: 'The package ledger the deploy job verifies against (resource/ledger/{ledger}.tsv)'
+        required: true
+        type: string
+
+env:
+  ledger: ${{ inputs.ledger }}
+  ledger_file: resource/ledger/${{ inputs.ledger }}.tsv
+  artifact: package-ledger-${{ inputs.ledger }}-${{ github.run_attempt }}
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    name: "Record ${{ inputs.ledger }} ledger"
+    timeout-minutes: 180
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: "Wait for the deploy job to hand over the ledger"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          while true; do
+            handed_over=$(gh api "$run/artifacts?name=$artifact" --jq '.total_count' || echo 0)
+            if [ "$handed_over" = "1" ]; then
+              exit 0
+            fi
+            # deploy.yml names its job "Deploy {repo}"
+            finished=$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+              --jq '[.jobs[] | select((.name | contains("/ Deploy ")) and .status == "completed")] | length' || echo 0)
+            if [ "$finished" != "0" ]; then
+              echo "::error::The deploy job finished without handing over a ledger"
+              exit 1
+            fi
+            sleep 30
+          done
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: "Fetch the ledger from the deploy job"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir "$RUNNER_TEMP/ledger"
+          cp "$RUNNER_TEMP/ledger/$ledger.tsv" "$ledger_file"
+      - name: "Commit and push the ledger"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git add "$ledger_file"
+          if git diff --cached --quiet; then
+            echo "The package ledger is unchanged"
+            exit 0
+          fi
+          git config user.email "info@mage-os.org"
+          git config user.name "Mage-OS CI"
+          git commit -m "Record package ledger for $ledger deploy" -m "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git -c credential.helper='!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f' \
+            push origin "HEAD:$GITHUB_REF_NAME"

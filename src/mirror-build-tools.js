@@ -217,6 +217,13 @@ async function createMetaPackagesSinceTag(instruction, metapackage, releaseConte
       dependencyVersions: (instruction.fixVersions?.[tag] ?? {})
     });
 
+    try {
+      assertHistory(instruction, metapackage, packageName, tag);
+    } catch (exception) {
+      console.log(exception.message);
+      continue;
+    }
+
     await createComposerJsonOnlyPackage(
       instruction,
       release,
@@ -240,6 +247,27 @@ async function createMetaPackagesSinceTag(instruction, metapackage, releaseConte
     );
   }
   return tags;
+}
+
+/**
+ * Without a history file the metapackage requires the newest tag of each
+ * dependency in its template, and the version is published and frozen with
+ * whatever that was on the day it was built. A tag of a metapackage listed in
+ * instruction.requireHistory is therefore not built until its file exists.
+ *
+ * @param {repositoryBuildDefinition} instruction
+ * @param {Object} metapackage
+ * @param {String} packageName
+ * @param {String} tag
+ */
+function assertHistory(instruction, metapackage, packageName, tag) {
+  if (!instruction.requireHistory?.includes(metapackage.name)) return;
+
+  const file = `resource/history/${packageName}/${tag}.json`;
+  if (!fs.existsSync(`${__dirname}/../${file}`)) {
+    // An Error rather than a {message} object, so the tag counts as a failure worth retrying.
+    throw new Error(`Not building ${packageName} ${tag}: no release history file ${file}`);
+  }
 }
 
 /**
@@ -287,6 +315,7 @@ async function processMirrorInstruction(instruction, releaseContext) {
 }
 
 module.exports = {
+  assertHistory,
   copyAdditionalPackages,
   processMirrorInstruction
 }

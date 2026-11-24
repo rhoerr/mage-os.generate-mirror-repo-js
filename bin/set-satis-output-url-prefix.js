@@ -91,12 +91,17 @@ if (packagePathTemplate.startsWith(parsedUrl.pathname)) {
 }
 
 for (const packageName of packages['available-packages']) {
-  const packageFilePath = path.join(satisOutputDir, packagePathTemplate.replace('%package%', packageName));
-  const packageData = JSON.parse(fs.readFileSync(packageFilePath));
+  for (const metadataName of [packageName, `${packageName}~dev`]) {
+    const packageFilePath = path.join(satisOutputDir, packagePathTemplate.replace('%package%', metadataName));
+    if (metadataName !== packageName && !fs.existsSync(packageFilePath)) {
+      continue;
+    }
+    const packageData = JSON.parse(fs.readFileSync(packageFilePath));
 
-  packageData.packages[packageName] = (packageData.packages[packageName] || []).map(packageRelease => {
-    fixUrl(packageRelease.dist);
-    return packageRelease;
-  });
-  writeJson(packageFilePath, packageData);
+    packageData.packages[packageName] = (packageData.packages[packageName] || []).map(packageRelease => {
+      fixUrl(packageRelease.dist);
+      return packageRelease;
+    });
+    writeJson(packageFilePath, packageData);
+  }
 }
