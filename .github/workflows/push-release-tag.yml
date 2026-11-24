@@ -42,7 +42,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     name: "Push git tags from repo working copies"
-    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) }}
+    if: ${{ contains(fromJSON('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]'), github.actor) }}
     permissions:
       actions: read
     steps:
