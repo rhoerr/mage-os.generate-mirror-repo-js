@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     name: "Audit ${{ matrix.ledger }} ledger"
     timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -21,12 +24,29 @@ jobs:
             repo: https://mirror.mage-os.org/
           - ledger: release
             repo: https://repo.mage-os.org/
+    env:
+      ledger: ${{ matrix.ledger }}
+      repo: ${{ matrix.repo }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
       - run: npm ci
       - name: "Compare the live metadata with the ledger"
-        run: node bin/package-ledger.js audit --checkTimes --ledger=resource/ledger/${{ matrix.ledger }}.tsv --repoUrl=${{ matrix.repo }}
+        id: audit
+        shell: bash
+        run: |
+          set -o pipefail
+          node bin/package-ledger.js audit --checkTimes --ledger="resource/ledger/$ledger.tsv" --repoUrl="$repo" 2>&1 | tee "$RUNNER_TEMP/audit.log"
+      - name: "Open, update or close the audit issue"
+        if: ${{ !cancelled() && (steps.audit.outcome == 'success' || steps.audit.outcome == 'failure') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          outcome: ${{ steps.audit.outcome }}
+        run: node bin/ledger-audit-issue.js --ledger="$ledger" --repoUrl="$repo" --outcome="$outcome" --log="$RUNNER_TEMP/audit.log"

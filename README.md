@@ -243,7 +243,9 @@ writes. Add `--checkTimes` to also check the metadata files composer 2 reads, in
 
 The `audit package ledger` workflow runs this daily against both production repositories and fails when they
 differ from the ledger. It stays red for a repository until its first production deploy with the ledger, because
-the live metadata has no `published-time` before that.
+the live metadata has no `published-time` before that. A failing audit opens an issue labelled `ledger-audit` for the
+repository that mentions `@mage-os/infrastructure`, and comments on it when the output changes. The issue is closed
+when the audit passes again.
 
 ### Ref ledger
 
