@@ -774,6 +774,20 @@ describe('package-ledger', () => {
       ]);
     });
 
+    it('reads the given packages.json instead of fetching it', async () => {
+      const fetchJson = fakeFetch({
+        [`${REPO_URL}p2/acme/alpha.json`]: {packages: {'acme/alpha': [version('acme/alpha', '1.0.0')]}},
+      });
+
+      const entries = await sut.fetchRepoEntries(REPO_URL, fetchJson, {
+        fromMetadataUrl: true,
+        packagesJson: {'available-packages': ['acme/alpha']},
+      });
+
+      expect(entries.map(e => e.name)).toEqual(['acme/alpha']);
+      expect(fetchJson).not.toHaveBeenCalledWith(`${REPO_URL}packages.json`);
+    });
+
     it('does not hide request failures', async () => {
       const fetchJson = jest.fn(async url => {
         if (url.endsWith('packages.json')) {

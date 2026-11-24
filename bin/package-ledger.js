@@ -189,9 +189,14 @@ async function verify() {
 async function audit() {
   const repoUrl = requireOption('repoUrl');
   const rows = ledger.readLedger(options.ledger);
+  const packagesJson = await fetchJson(`${repoUrl.replace(/\/$/, '')}/packages.json`);
+  const problems = ledger.packagesJsonProblems(packagesJson, repoUrl);
+  if (problems.length > 0) {
+    fail(problems);
+  }
   for (const fromMetadataUrl of options.checkTimes ? [false, true] : [false]) {
     const source = fromMetadataUrl ? 'p2 metadata' : 'include files';
-    const entries = await ledger.fetchRepoEntries(repoUrl, fetchJson, {fromMetadataUrl});
+    const entries = await ledger.fetchRepoEntries(repoUrl, fetchJson, {fromMetadataUrl, packagesJson});
     const results = ledger.classify(rows, entries);
     report(results, `Package ledger ${path.basename(options.ledger)} audit of ${repoUrl} ${source}`);
 

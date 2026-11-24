@@ -231,4 +231,71 @@ describe('bin/package-ledger.js', () => {
       expect(fs.existsSync(path.join(dir, 'build'))).toBe(false);
     });
   });
+
+  describe('audit', () => {
+    const http = require('http');
+    const {execFile} = require('child_process');
+    const name = 'mage-os/product-community-edition';
+    let server;
+    let repoUrl;
+    let served;
+    let requests;
+
+    beforeEach(async () => {
+      requests = [];
+      server = http.createServer((request, response) => {
+        const file = decodeURIComponent(request.url.split('?')[0]);
+        requests.push(file);
+        response.writeHead(file in served ? 200 : 404);
+        response.end(served[file] || '');
+      });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+      repoUrl = `http://127.0.0.1:${server.address().port}/`;
+      const version = {
+        name,
+        version: '2.0.0',
+        version_normalized: '2.0.0.0',
+        dist: {type: 'zip', url: `${repoUrl}packages/${name}-2.0.0.zip`, shasum: sha1('published')},
+        'published-time': TIME,
+      };
+      served = {
+        '/packages.json': JSON.stringify({
+          packages: [],
+          includes: {'include/all$abc.json': {sha1: 'abc'}},
+          'metadata-url': '/p2/%package%.json',
+          'available-packages': [name],
+        }),
+        '/include/all$abc.json': JSON.stringify({packages: {[name]: {'2.0.0': version}}}),
+        [`/p2/${name}.json`]: JSON.stringify({packages: {[name]: [version]}}),
+      };
+    });
+
+    afterEach(async () => {
+      await new Promise(resolve => server.close(resolve));
+    });
+
+    const audit = () => new Promise(resolve => execFile(
+      process.execPath,
+      [CLI, 'audit', `--ledger=${ledgerFile}`, `--repoUrl=${repoUrl}`, '--checkTimes'],
+      {cwd: dir, encoding: 'utf8'},
+      (error, stdout) => resolve({status: error ? error.code : 0, stdout})
+    ));
+
+    it('passes on the packages.json satis writes and fetches it once', async () => {
+      const result = await audit();
+      expect(result.status).toBe(0);
+      expect(requests.filter(file => file === '/packages.json')).toHaveLength(1);
+    });
+
+    it.each([
+      ['providers-url', {'providers-url': '/p/%package%$%hash%.json'}, 'FAILED: packages.json: unexpected providers-url'],
+      ['a changed metadata-url', {'metadata-url': 'https://evil.example.com/p2/%package%.json'}, 'FAILED: packages.json: metadata-url is'],
+    ])('fails once on a packages.json with %s', async (_, change, failure) => {
+      served['/packages.json'] = JSON.stringify({...JSON.parse(served['/packages.json']), ...change});
+      const result = await audit();
+      expect(result.status).toBe(1);
+      expect(result.stdout.split('\n').filter(line => line.startsWith(failure))).toHaveLength(1);
+      expect(result.stdout).not.toContain('do not match the ledger');
+    });
+  });
 });
