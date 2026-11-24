@@ -152,6 +152,8 @@ The deploy workflow uses the ledger like this:
    - an already published package has different contents, or is missing from the build
    - the `published-time` of an already published version is not the one in the ledger
    - a new version has no `published-time`, or one that is not the time of the build
+   - `packages.json` or a version has anything satis does not write for these packages, a `source` say, or a `dist`
+     other than a zip with url and shasum
 
    New versions are fine. There is no override flag.  
    The one exception is a `magento/*` alias metapackage of the release repository. It may change if it is an alias
@@ -171,7 +173,8 @@ The deploy workflow uses the ledger like this:
 A production deploy only builds what the ledger does not have, and adds it to the metadata the repository serves:
 
 1. `package-ledger.js base` fetches the live `packages.json` and its include file, and checks that they contain every
-   ledger version with the ledger's sha1, `metadata-sha256` and `published-time`, and no other version.
+   ledger version with the ledger's sha1, `metadata-sha256` and `published-time`, no other version, and nothing
+   satis does not write.
 2. The generator skips the versions in the ledger and the tags in the ref ledger. The release build generates the
    `magento/*` aliases from the live metadata and the new packages, and only writes aliases that are new or now point
    at a newer `mage-os/*` version.

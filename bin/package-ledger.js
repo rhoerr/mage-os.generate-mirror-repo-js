@@ -154,17 +154,21 @@ async function verify() {
     throw new Error('--pendingRefs requires --update and --refs');
   }
   const satisOutputDir = options.satisOutputDir || 'build';
+  const repoUrl = requireOption('repoUrl');
   const results = await ledger.verifyBuild(ledger.readLedger(options.ledger), {
     satisOutputDir,
     packagesDir: options.packagesDir || path.join(satisOutputDir, 'packages'),
-    repoUrl: requireOption('repoUrl'),
+    repoUrl,
     expectDiff: (options.expectDiff || '').split(',').filter(Boolean),
     allowAliasRepoint: options.allowAliasRepoint,
     incremental: options.incremental,
   });
   report(results, `Package ledger ${path.basename(options.ledger)} (${mode})`);
 
-  const failures = ledger.gateFailures(results);
+  const failures = [
+    ...ledger.packagesJsonProblems(JSON.parse(fs.readFileSync(path.join(satisOutputDir, 'packages.json'), 'utf8')), repoUrl),
+    ...ledger.gateFailures(results),
+  ];
   if (mode === 'gate' && failures.length > 0) {
     return fail(failures);
   }

@@ -109,6 +109,20 @@ describe('bin/package-ledger.js', () => {
     const pending = (tag, versions, overrides = {}) => ({instruction: 'magento2', tag, commit, fingerprint, versions, ...overrides});
     const verify = () => run('verify', '--satisOutputDir=build', `--repoUrl=${REPO_URL}`, '--update', `--refs=${refsFile}`, `--pendingRefs=${pendingFile}`);
 
+    it('does not update the ledgers from a packages.json satis did not write', () => {
+      fs.writeFileSync(pendingFile, JSON.stringify([pending('2.1.0', [[name, '2.1.0']])]));
+      fs.writeFileSync(path.join(dir, 'build', 'packages.json'), JSON.stringify({
+        'available-packages': [name],
+        repositories: [{type: 'vcs', url: 'https://evil.example.com/repo.git'}],
+      }));
+      const before = fs.readFileSync(ledgerFile, 'utf8');
+      const result = verify();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('FAILED: packages.json: unexpected repositories');
+      expect(fs.readFileSync(ledgerFile, 'utf8')).toBe(before);
+      expect(refs.readRefs(refsFile)).toEqual([]);
+    });
+
     it('records the tags whose versions are all in the updated ledger', () => {
       fs.writeFileSync(pendingFile, JSON.stringify([
         pending('2.1.0', [[name, '2.1.0']]),

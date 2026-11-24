@@ -138,6 +138,15 @@ function writeSeeds(rows, satisOutputDir) {
 
 const METADATA_FIELDS = ['name', 'version', 'type', 'require', 'require-dev', 'replace', 'provide', 'conflict', 'suggest', 'autoload', 'extra', 'bin'];
 const LINK_FIELDS = ['require', 'require-dev', 'replace', 'provide', 'conflict'];
+// What satis writes for the packages built here. Composer acts on fields metadataSha256 does not cover, such as
+// source, which it falls back to if the dist download fails, so anything else is rejected.
+const VERSION_FIELDS = [
+  'name', 'version', 'version_normalized', 'dist', 'require', 'require-dev', 'replace', 'provide', 'conflict',
+  'suggest', 'type', 'autoload', 'autoload-dev', 'extra', 'bin', 'license', 'description', 'abandoned', 'scripts',
+  'authors', 'support', 'archive', 'homepage', 'keywords', 'published-time',
+];
+const DIST_FIELDS = ['type', 'url', 'shasum'];
+const PACKAGES_JSON_FIELDS = ['packages', 'includes', 'metadata-url', 'available-packages'];
 
 // PHP decodes {} and [] to the same empty array, so satis metadata can not tell them apart.
 function canonicalJson(value) {
@@ -195,6 +204,16 @@ function metadataEntries(data, packageName, repoUrl) {
     if (!url.startsWith(prefix)) {
       throw new Error(`${packageName} ${version.version}: dist url "${url}" is not below ${prefix}`);
     }
+    const unexpected = [
+      ...Object.keys(version).filter(field => !VERSION_FIELDS.includes(field)),
+      ...Object.keys(version.dist).filter(field => !DIST_FIELDS.includes(field)).map(field => `dist ${field}`),
+    ];
+    if (unexpected.length > 0) {
+      throw new Error(`${packageName} ${version.version}: unexpected ${unexpected.join(', ')}`);
+    }
+    if (version.dist.type !== 'zip') {
+      throw new Error(`${packageName} ${version.version}: dist type "${version.dist.type}" is not zip`);
+    }
     return {
       name: version.name,
       version: version.version,
@@ -206,6 +225,48 @@ function metadataEntries(data, packageName, repoUrl) {
       ...(version.replace ? {replace: version.replace} : {}),
     };
   });
+}
+
+function isOutsideRepository(file) {
+  return file.split('/').includes('..') || path.isAbsolute(file);
+}
+
+/**
+ * Reasons a packages.json is not what satis generates for the repository: anything more in it can point
+ * composer at other metadata.
+ *
+ * @param {Object} packages The parsed packages.json
+ * @param {String} repoUrl
+ * @returns {Array<String>}
+ */
+function packagesJsonProblems(packages, repoUrl) {
+  if (packages === null || typeof packages !== 'object' || Array.isArray(packages)) {
+    return ['packages.json is not an object'];
+  }
+  const problems = Object.keys(packages)
+    .filter(field => !PACKAGES_JSON_FIELDS.includes(field))
+    .map(field => `packages.json: unexpected ${field}`);
+  if ('packages' in packages && !(Array.isArray(packages.packages) && packages.packages.length === 0)) {
+    problems.push('packages.json: packages is not empty');
+  }
+  // Satis prefixes the path of its homepage
+  const metadataUrl = new URL(trailingSlash(repoUrl)).pathname + 'p2/%package%.json';
+  if ('metadata-url' in packages && packages['metadata-url'] !== metadataUrl) {
+    problems.push(`packages.json: metadata-url is "${packages['metadata-url']}", not "${metadataUrl}"`);
+  }
+  if ('includes' in packages) {
+    if (packages.includes === null || typeof packages.includes !== 'object' || Array.isArray(packages.includes)) {
+      problems.push('packages.json: includes is not an object');
+    } else {
+      Object.keys(packages.includes).filter(isOutsideRepository)
+        .forEach(include => problems.push(`packages.json: include file outside of the repository: ${include}`));
+    }
+  }
+  if ('available-packages' in packages
+    && !(Array.isArray(packages['available-packages']) && packages['available-packages'].every(name => typeof name === 'string'))) {
+    problems.push('packages.json: available-packages is not a list of package names');
+  }
+  return problems;
 }
 
 // The versions of an include or p2 file, with the shasum as the sha1 of the archive
@@ -363,7 +424,7 @@ async function fetchBaseMetadata(baseUrl, fetchText) {
   const packagesText = await fetchText(base + 'packages.json' + noCache);
   const files = [{file: 'packages.json', text: packagesText}];
   for (const include of Object.keys(JSON.parse(packagesText).includes || {})) {
-    if (include.split('/').includes('..') || path.isAbsolute(include)) {
+    if (isOutsideRepository(include)) {
       throw new Error(`Include file outside of the repository: ${include}`);
     }
     files.push({file: include, text: await fetchText(base + include + noCache)});
@@ -382,14 +443,16 @@ async function fetchBaseMetadata(baseUrl, fetchText) {
  */
 function baseMetadataFailures(rows, files, repoUrl) {
   let results;
+  let failures;
   try {
+    failures = packagesJsonProblems(JSON.parse(files.find(({file}) => file === 'packages.json').text), repoUrl);
     results = classify(rows, files
       .filter(({file}) => file !== 'packages.json')
       .flatMap(({text}) => includeEntries(JSON.parse(text), repoUrl)));
   } catch (exception) {
     return {results: null, failures: [exception.message || String(exception)]};
   }
-  const failures = gateFailures(results);
+  failures.push(...gateFailures(results));
   const {new: unknown} = summarize(results);
   if (unknown > 0) {
     failures.push(`${unknown} version(s) that are not in the ledger`);
@@ -661,6 +724,9 @@ async function fetchRepoEntries(repoUrl, fetchJson, {fromMetadataUrl = false} = 
   if (!fromMetadataUrl) {
     const entries = [];
     for (const include of Object.keys(packages.includes || {})) {
+      if (isOutsideRepository(include)) {
+        throw new Error(`Include file outside of the repository: ${include}`);
+      }
       entries.push(...includeEntries(await fetchJson(base + include), base).map(({publishedTime, ...entry}) => entry));
     }
     return entries;
@@ -741,6 +807,7 @@ module.exports = {
   guardFailures,
   metadataSha256,
   nextRows,
+  packagesJsonProblems,
   parseLedger,
   parseTimes,
   readAliasTarget,
