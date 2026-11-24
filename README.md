@@ -238,8 +238,8 @@ To compare what a repository currently serves against the ledger, run
 node bin/package-ledger.js audit --ledger=resource/ledger/mirror.tsv --repoUrl=https://mirror.mage-os.org/
 ```
 
-This checks the version list, the sha1 checksums and the download URLs. Add `--checkTimes` to also check the
-metadata files composer 2 reads, including each `published-time`.
+This checks the version list, the sha1 checksums, the download URLs and that the packages.json is what satis
+writes. Add `--checkTimes` to also check the metadata files composer 2 reads, including each `published-time`.
 
 The `audit package ledger` workflow runs this daily against both production repositories and fails when they
 differ from the ledger. It stays red for a repository until its first production deploy with the ledger, because

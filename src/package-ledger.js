@@ -716,10 +716,12 @@ function formatReport(results, {title, markdown = false, limit = Infinity} = {})
  *
  * @param {String} repoUrl
  * @param {function(String): Promise<Object>} fetchJson
+ * @param {{fromMetadataUrl: Boolean, packagesJson: Object|null}} options packagesJson: the parsed packages.json,
+ *   if already fetched
  */
-async function fetchRepoEntries(repoUrl, fetchJson, {fromMetadataUrl = false} = {}) {
+async function fetchRepoEntries(repoUrl, fetchJson, {fromMetadataUrl = false, packagesJson = null} = {}) {
   const base = trailingSlash(repoUrl);
-  const packages = await fetchJson(base + 'packages.json');
+  const packages = packagesJson || await fetchJson(base + 'packages.json');
 
   if (!fromMetadataUrl) {
     const entries = [];
