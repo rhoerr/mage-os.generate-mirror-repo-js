@@ -51,7 +51,7 @@ jobs:
   deploy:
     uses: ./.github/workflows/deploy.yml
     name: "generate & deploy"
-    if: ${{ github.event_name == 'schedule' || contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) }}
+    if: ${{ github.event_name == 'schedule' || contains(fromJSON('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]'), github.actor) }}
     permissions:
       contents: read
     with:
@@ -76,7 +76,7 @@ jobs:
   record-ledger:
     uses: ./.github/workflows/record-ledger.yml
     name: "record ledger"
-    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) && inputs.repo == 'https://repo.mage-os.org/' }}
+    if: ${{ contains(fromJSON('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]'), github.actor) && inputs.repo == 'https://repo.mage-os.org/' }}
     permissions:
       contents: write
       actions: read

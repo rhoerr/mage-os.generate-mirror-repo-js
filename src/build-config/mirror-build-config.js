@@ -5,6 +5,7 @@ const mirrorBuildConfig = {
   'magento2': {
     repoUrl: 'https://github.com/mage-os/mirror-magento2.git',
     fromTag: '2.3.7-p2',
+    requireHistory: ['product-community-edition'],
     fixVersions: {
       // Upstream doesn't have tag 2.1.2. It does have a branch with that name but the metapackage is incorrect.
       // See https://github.com/magento/adobe-stock-integration/issues/1871
