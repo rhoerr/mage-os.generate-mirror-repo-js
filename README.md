@@ -217,8 +217,9 @@ Things to know when running the `Build, deploy & check Mirror` and `Build, deplo
   The same goes for a wrong `published-time`.
 - If a deploy fails after the ledger was committed, do not re-run the failed run. Its build stamps the new versions
   with a new time, which conflicts with the recorded ledger. Start a new run, which uses the recorded ledger. For a
-  release, first push the release tag from the working copies artifact, then leave `mageos_release` empty, as the
-  guard refuses a published release.
+  release, first run the `push-release-tag.yml` workflow with the release and the id of the failed run, which pushes
+  the tag from that run's working copies artifact. Then leave `mageos_release` empty in the new run, as the guard
+  refuses a published release.
 - The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
   installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
 
@@ -377,7 +378,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="309" src="https://github.com/user-attachments/assets/34e2d5cf-175b-4f7a-98c4-26d2fc460e9e" />
 
 **Important**:
-- select the "preview" URL/folder in the first two combobox
+- select the "preview" URL in the first combobox
 - fill the version numbers and **do not** check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://preview-repo.mage-os.org and check that everything is ok, you should also
@@ -393,7 +394,7 @@ on the [generate-mirror-repo-js](https://github.com/mage-os/generate-mirror-repo
 <img width="310" src="https://github.com/user-attachments/assets/e6ae22f7-ad77-4017-a9ac-74224e14b82b" />
 
 **Important**:
-- select the production URL/folder in the first two combobox (the ones without the "preview" prefix)
+- select the production URL in the first combobox (the one without the "preview" prefix)
 - fill the version numbers and check the "push new release tag to repos"
 
 After the workflow has finished, you can go https://repo.mage-os.org and check that everything is ok, you should also

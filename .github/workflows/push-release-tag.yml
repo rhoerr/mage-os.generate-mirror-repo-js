@@ -7,11 +7,26 @@ on:
         description: 'The Mage-OS Release Tag (e.g. 1.0.0)'
         required: true
         type: string
+      run_id:
+        description: 'The workflow run that uploaded the working copies artifact. Empty is the current run'
+        required: false
+        default: ''
+        type: string
 
     secrets:
       MAGE_OS_CI_TOKEN:
         description: "GitHub PAT for pushing the tag to remote repositories"
         required: true
+  workflow_dispatch:
+    inputs:
+      mageos_release:
+        description: 'The Mage-OS Release Tag (e.g. 1.0.0)'
+        required: true
+        type: string
+      run_id:
+        description: 'The id of the workflow run that uploaded the working copies artifact'
+        required: true
+        type: string
 
 env:
   mageos_release: ${{ inputs.mageos_release }}
@@ -27,10 +42,15 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     name: "Push git tags from repo working copies"
+    if: ${{ contains(fromJSON('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]'), github.actor) }}
+    permissions:
+      actions: read
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: release-build-working-copies-${{ env.mageos_release }}
+          run-id: ${{ inputs.run_id || github.run_id }}
+          github-token: ${{ inputs.run_id != '' && github.token || '' }}
       - run: tar -xf release-build-working-copies-${{ env.mageos_release }}.tar
         name: "Untar working copies"
       - run: git config --global user.email "info@mage-os.org" && git config --global user.name "Mage-OS CI"

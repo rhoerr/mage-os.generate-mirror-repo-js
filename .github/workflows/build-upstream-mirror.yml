@@ -14,14 +14,6 @@ on:
         options:
           - https://preview-mirror.mage-os.org/
           - https://mirror.mage-os.org/
-      remote_dir:
-        description: 'The deploy target directory on the repo host'
-        required: true
-        default: '/var/www/preview-mirror.mage-os.org/html/'
-        type: choice
-        options:
-          - /var/www/preview-mirror.mage-os.org/html/
-          - /var/www/mirror.mage-os.org/html/
       full_rebuild:
         description: 'Production only: rebuild every package instead of adding the new ones to the live metadata. Previews always rebuild everything'
         required: false
@@ -32,7 +24,7 @@ on:
 # in-progress rsync is never interrupted mid-deploy. The target is production whenever the ledger is
 # recorded, as each production build adds to the metadata the previous one uploaded.
 concurrency:
-  group: ${{ github.workflow }}-${{ (inputs.repo == 'https://mirror.mage-os.org/' || inputs.remote_dir == '/var/www/mirror.mage-os.org/html/') && 'production' || 'preview' }}
+  group: ${{ github.workflow }}-${{ inputs.repo == 'https://mirror.mage-os.org/' && 'production' || 'preview' }}
   cancel-in-progress: false
 
 jobs:
@@ -44,11 +36,11 @@ jobs:
       contents: read
     with:
       repo: ${{ (github.event_name == 'workflow_dispatch' && inputs.repo) || 'https://preview-mirror.mage-os.org/' }}
-      remote_dir: ${{ (github.event_name == 'workflow_dispatch' && inputs.remote_dir) || '/var/www/preview-mirror.mage-os.org/html/' }}
+      remote_dir: ${{ inputs.repo == 'https://mirror.mage-os.org/' && '/var/www/mirror.mage-os.org/html/' || '/var/www/preview-mirror.mage-os.org/html/' }}
       entrypoint: src/make/mirror.js
       delete: true
       ledger: mirror
-      enforce_ledger: ${{ inputs.repo == 'https://mirror.mage-os.org/' || inputs.remote_dir == '/var/www/mirror.mage-os.org/html/' }}
+      enforce_ledger: ${{ inputs.repo == 'https://mirror.mage-os.org/' }}
       full_rebuild: ${{ inputs.full_rebuild == true }}
     secrets:
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
@@ -60,7 +52,7 @@ jobs:
   record-ledger:
     uses: ./.github/workflows/record-ledger.yml
     name: "record ledger"
-    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) && (inputs.repo == 'https://mirror.mage-os.org/' || inputs.remote_dir == '/var/www/mirror.mage-os.org/html/') }}
+    if: ${{ contains('["vinai", "rhoerr", "marcelmtz", "mage-os-ci"]', github.actor) && inputs.repo == 'https://mirror.mage-os.org/' }}
     permissions:
       contents: write
       actions: read
