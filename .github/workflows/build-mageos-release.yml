@@ -111,6 +111,8 @@ jobs:
     if: ${{ success() && inputs.mageos_release && inputs.publish_tag }}
     needs: [ deploy, record-ledger ]
     uses: ./.github/workflows/push-release-tag.yml
+    permissions:
+      actions: read
     with:
       mageos_release: ${{ inputs.mageos_release }}
 

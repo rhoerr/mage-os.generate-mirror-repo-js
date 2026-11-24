@@ -153,6 +153,18 @@ jobs:
             ${{ env.ledger_mode_arg }} ${{ env.ledger_alias_repoint_arg }}
         name: "Verify the packages against the ledger"
         if: ${{ inputs.ledger != '' }}
+      # Uploaded before the ledger is handed over, so the release tag can still be pushed from this run
+      # if the deploy fails after the ledger was recorded
+      - run: cd generate-repo && tar -cf ../release-build-working-copies-${{ env.mageos_release }}.tar repositories && cd ..
+        name: Tar git working copies
+        if: ${{ success() && env.mageos_release != '' && env.publish_tag == 'true' }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ success() && env.mageos_release != '' && env.publish_tag  == 'true' }}
+        with:
+          name: release-build-working-copies-${{ env.mageos_release }}
+          path: release-build-working-copies-${{ env.mageos_release }}.tar
+          retention-days: 90
+          overwrite: true
       # This job has no token that can push. The record-ledger.yml job of the same workflow run commits the ledger.
       - uses: actions/upload-artifact@v4
         name: "Hand the ledger over to the job recording it"
@@ -195,16 +207,6 @@ jobs:
           TARGET: ${{ env.remote_dir }}
           ARGS: "--verbose --compress --recursive --links --times --omit-dir-times --checksum --exclude=*.zip --exclude=/packages/ ${{ env.delete_arg }}"
           SOURCE: "build/*"
-
-      - run: cd generate-repo && tar -cf ../release-build-working-copies-${{ env.mageos_release }}.tar repositories && cd ..
-        name: Tar git working copies
-        if: ${{ success() && env.mageos_release != '' && env.publish_tag == 'true' }}
-      - uses: actions/upload-artifact@v4
-        if: ${{ success() && env.mageos_release != '' && env.publish_tag  == 'true' }}
-        with:
-          name: release-build-working-copies-${{ env.mageos_release }}
-          path: release-build-working-copies-${{ env.mageos_release }}.tar
-          retention-days: 90
 
       - name: Purge Cloudflare cache for the repo metadata
         env:
