@@ -1,0 +1,11 @@
+{
+  "require": {
+    "adobe-commerce/adobe-ims-metapackage": "^2.2",
+    "adobe-commerce/os-extensions-metapackage": "~1.0",
+    "magento/adobe-stock-integration": "2.1.6-beta1",
+    "magento/inventory-metapackage": "1.2.7-beta1",
+    "magento/page-builder": "1.7.4-beta1",
+    "magento/security-package": "1.1.6-beta1",
+    "temando/module-shipping": "2.0.0"
+  }
+}

@@ -593,6 +593,59 @@ describe('mirror-build-tools', () => {
       expect(typeof transformFn).toBe('function');
     });
 
+    describe('requireHistory', () => {
+      const historyFile = tag => expect.stringMatching(new RegExp(`/resource/history/test-vendor/product-community-edition/${tag}\\.json$`));
+      const builtTags = name => createComposerJsonOnlyPackage.mock.calls
+        .filter(call => call[2] === `test-vendor/${name}`)
+        .map(call => call[3]);
+
+      beforeEach(() => {
+        fs.existsSync.mockImplementation(file => !file.endsWith('/product-community-edition/2.0.0.json'));
+      });
+
+      test('should skip a tag without a history file and build the later tags and the other metapackages', async () => {
+        const instruction = createMockInstruction({
+          requireHistory: ['product-community-edition'],
+          extraMetapackages: [
+            { name: 'product-community-edition', transform: [] },
+            { name: 'project-community-edition', transform: [] }
+          ]
+        });
+
+        await sut.processMirrorInstruction(instruction, createMockReleaseContext());
+
+        expect(builtTags('product-community-edition')).toEqual(['1.0.0', '2.1.0']);
+        expect(builtTags('project-community-edition')).toEqual(['1.0.0', '2.0.0', '2.1.0']);
+        expect(console.log).toHaveBeenCalledWith(
+          'Not building test-vendor/product-community-edition 2.0.0: no release history file resource/history/test-vendor/product-community-edition/2.0.0.json'
+        );
+      });
+
+      test('should build every tag of a metapackage not listed, as release builds do', async () => {
+        const instruction = createMockInstruction({
+          extraMetapackages: [{ name: 'product-community-edition', transform: [] }]
+        });
+
+        await sut.processMirrorInstruction(instruction, createMockReleaseContext());
+
+        expect(builtTags('product-community-edition')).toEqual(['1.0.0', '2.0.0', '2.1.0']);
+        expect(fs.existsSync).not.toHaveBeenCalledWith(historyFile('2.0.0'));
+      });
+
+      test('should throw an Error naming the tag and the missing file', () => {
+        const instruction = createMockInstruction({ requireHistory: ['product-community-edition'] });
+        const metapackage = { name: 'product-community-edition' };
+
+        expect(() => sut.assertHistory(instruction, metapackage, 'test-vendor/product-community-edition', '2.0.0'))
+          .toThrow(new Error('Not building test-vendor/product-community-edition 2.0.0: no release history file resource/history/test-vendor/product-community-edition/2.0.0.json'));
+        expect(() => sut.assertHistory(instruction, metapackage, 'test-vendor/product-community-edition', '2.0.0'))
+          .toThrow(Error);
+        expect(fs.existsSync).toHaveBeenCalledWith(historyFile('2.0.0'));
+        expect(() => sut.assertHistory(instruction, metapackage, 'test-vendor/product-community-edition', '2.1.0'))
+          .not.toThrow();
+      });
+    });
+
     test('should process createTagForRef calls in parallel', async () => {
       const instruction = createMockInstruction({
         extraRefToRelease: [
@@ -1090,6 +1143,24 @@ describe('mirror-build-tools', () => {
           '2.1.0': [],
         });
       });
+    });
+
+    test('does not record a tag a metapackage of which has no release history yet', async () => {
+      const TAGS = ['1.0.0', '2.0.0', '2.1.0'];
+      fs.existsSync.mockImplementation(file => !String(file).endsWith('/product-community-edition/2.0.0.json'));
+      createPackagesForRef.mockImplementation(async (_, __, release) => ({'magento/module-a': release.ref}));
+      const refRecorder = createRefRecorder({
+        listRemoteTags: async () => new Map(TAGS.map((tag, index) => [tag, String(index).repeat(40)])),
+        pendingFile: '/pending.json',
+      });
+
+      await sut.processMirrorInstruction(instruction({
+        requireHistory: ['product-community-edition'],
+        extraMetapackages: [{name: 'product-community-edition', transform: []}],
+      }), {composerRepoUrl: 'https://repo.test/'}, refRecorder);
+
+      const [, pending] = fs.writeFileSync.mock.calls.find(([file]) => file === '/pending.json');
+      expect(JSON.parse(pending).map(({tag}) => tag)).toEqual(['1.0.0', '2.1.0']);
     });
 
     test('does not clone or tag a repository whose tags are all recorded', async () => {

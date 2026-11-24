@@ -323,6 +323,8 @@ For a practical example [check this PR](https://github.com/mage-os/github-action
   cp ../mageos-magento2-base-composer-json/2.4.7-p4/product-community-edition/composer.json resource/history/magento/product-community-edition/2.4.7-p4.json
   cp ../mageos-magento2-base-composer-json/2.4.7-p4/project-community-edition/composer.json resource/history/magento/project-community-edition/2.4.7-p4.json
   ```
+  The mirror build does not build `magento/product-community-edition` for a tag without a file in
+  `resource/history/magento/product-community-edition/`, and logs the missing file, so the version is published once the file is added.
 - "Build" the mirror with  
   `rm -rf repositories; node src/make/mirror.js --outputDir=build`
 - Download all missing packages with  

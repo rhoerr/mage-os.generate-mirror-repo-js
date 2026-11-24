@@ -996,6 +996,7 @@ describe('package-ledger', () => {
         extra: {map: [['a', 'b']]}, bin: ['bin/alpha'], license: ['OSL-3.0'], description: 'Alpha', abandoned: true,
         scripts: {test: 'phpunit'}, authors: [{name: 'Acme'}], support: {issues: 'https://acme.example.com'},
         archive: {exclude: ['/Test']}, homepage: 'https://acme.example.com', keywords: ['alpha'],
+        funding: [{type: 'github', url: 'https://github.com/sponsors/acme'}],
       });
       const rows = [{...ledgerRows[0], 'metadata-sha256': sut.metadataSha256(full)}, ledgerRows[1]];
       expect(sut.baseMetadataFailures(rows, filesOf([full, metadataOf(ledgerRows[1])]), REPO_URL).failures).toEqual([]);
