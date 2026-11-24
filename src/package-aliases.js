@@ -35,6 +35,43 @@ async function readComposerJsonFromZip(zipFilePath) {
 }
 
 /**
+ * The package a magento/* alias metapackage points at, or null if the composer.json is anything other
+ * than an alias metapackage requiring exactly one package.
+ *
+ * @param {Object} composer - composer.json content
+ * @returns {{name: string, version: string, target: {name: string, version: string}}|null}
+ */
+function aliasTarget(composer) {
+  const allowedKeys = ['name', 'description', 'type', 'version', 'require'];
+  if (!composer || typeof composer !== 'object' || Object.keys(composer).some(key => !allowedKeys.includes(key))) {
+    return null;
+  }
+  const requires = Object.entries(composer.require || {});
+  if (
+    typeof composer.name !== 'string'
+    || !composer.name.startsWith('magento/')
+    || composer.type !== 'metapackage'
+    || requires.length !== 1
+    || typeof requires[0][1] !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    name: composer.name,
+    version: composer.version,
+    target: {name: requires[0][0], version: requires[0][1]},
+  };
+}
+
+/**
+ * aliasTarget() of a package version in satis metadata, which adds these keys to the composer.json.
+ */
+function metadataAliasTarget(version) {
+  const {version_normalized, dist, 'published-time': publishedTime, ...composer} = version;
+  return aliasTarget(composer);
+}
+
+/**
  * Create a magento/* alias metapackage that requires the corresponding mage-os/* package.
  *
  * @param {string} magentoPackageName - The magento/* package name (e.g., 'magento/module-catalog')
@@ -111,11 +148,15 @@ function newestReplacers(composers) {
  * corresponding alias packages. When multiple mage-os versions replace the same
  * magento version, the highest mage-os version wins.
  *
+ * With the metadata of an incremental build's base, the packages in it count as built, and only aliases
+ * that are not in it or that point at an older version are written.
+ *
  * @param {string} archiveDir - The package output directory
  * @param {Object} packageModules - The package-modules module (for archiveFilePath and writePackage)
+ * @param {Array<Object>|null} baseVersions - Package versions of the base metadata
  * @returns {Promise<Object.<string, string>>} - Map of created aliases {name: version}
  */
-async function generateAliasesFromBuiltPackages(archiveDir, packageModules) {
+async function generateAliasesFromBuiltPackages(archiveDir, packageModules, baseVersions = null) {
   const mageosDir = path.join(archiveDir, 'mage-os');
 
   if (!fs.existsSync(mageosDir)) {
@@ -138,11 +179,28 @@ async function generateAliasesFromBuiltPackages(archiveDir, packageModules) {
     }
   }
 
+  const published = new Map();
+  for (const version of baseVersions || []) {
+    if (version.name.startsWith('mage-os/')) {
+      composers.push(version);
+    } else if (version.name.startsWith('magento/')) {
+      published.set(`${version.name}:${version.version}`, version);
+    }
+  }
+
   // Create alias packages for each winning candidate
   const aliasPackages = {};
 
   for (const candidate of newestReplacers(composers).values()) {
     const {magentoName, magentoVersion, mageOsName, mageOsVersion} = candidate;
+
+    const existing = published.get(`${magentoName}:${magentoVersion}`);
+    if (existing) {
+      const alias = metadataAliasTarget(existing);
+      if (!alias || (alias.target.name === mageOsName && alias.target.version === mageOsVersion)) {
+        continue;
+      }
+    }
 
     try {
       const created = await createMagentoAliasPackage(
@@ -167,8 +225,10 @@ async function generateAliasesFromBuiltPackages(archiveDir, packageModules) {
 }
 
 module.exports = {
+  aliasTarget,
   createMagentoAliasPackage,
   generateAliasesFromBuiltPackages,
+  metadataAliasTarget,
   newestReplacers,
   readComposerJsonFromZip
 };

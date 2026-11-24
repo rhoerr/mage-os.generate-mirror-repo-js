@@ -14,11 +14,17 @@ on:
         options:
           - https://preview-mirror.mage-os.org/
           - https://mirror.mage-os.org/
+      full_rebuild:
+        description: 'Production only: rebuild every package instead of adding the new ones to the live metadata. Previews always rebuild everything'
+        required: false
+        default: false
+        type: boolean
 
 # One build per deploy target at a time; queue rather than cancel so an
-# in-progress rsync is never interrupted mid-deploy
+# in-progress rsync is never interrupted mid-deploy. The target is production whenever the ledger is
+# recorded, as each production build adds to the metadata the previous one uploaded.
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.repo || 'https://preview-mirror.mage-os.org/' }}
+  group: ${{ github.workflow }}-${{ inputs.repo == 'https://mirror.mage-os.org/' && 'production' || 'preview' }}
   cancel-in-progress: false
 
 jobs:
@@ -35,6 +41,7 @@ jobs:
       delete: true
       ledger: mirror
       enforce_ledger: ${{ inputs.repo == 'https://mirror.mage-os.org/' }}
+      full_rebuild: ${{ inputs.full_rebuild == true }}
     secrets:
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
       REMOTE_USER: ${{ secrets.REMOTE_USER }}

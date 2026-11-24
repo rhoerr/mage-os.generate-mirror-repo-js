@@ -10,8 +10,11 @@ const {
   createPackageForRef,
   createMetaPackageFromRepoDir,
   createComposerJsonOnlyPackage,
-  archiveFilePath
+  archiveFilePath,
+  isPublished,
+  isPublishedArchive
 } = require('../../src/package-modules');
+const {createRefRecorder} = require('../../src/ref-ledger');
 const JSZip = require('jszip');
 
 // Mock all dependencies
@@ -1032,6 +1035,183 @@ describe('mirror-build-tools', () => {
       expect(createMetaPackageFromRepoDir).toHaveBeenCalled();
       const releaseArg = createMetaPackageFromRepoDir.mock.calls[0][2];
       expect(releaseArg.fallbackVersion).toBe('1.0.0');
+    });
+  });
+
+  describe('ledger skips', () => {
+    const instruction = (overrides = {}) => ({
+      key: 'repo',
+      repoUrl: 'https://github.com/test/repo.git',
+      fromTag: '1.0.0',
+      vendor: 'magento',
+      extraRefToRelease: [],
+      packageDirs: [{label: 'Modules', dir: 'app/code'}],
+      packageIndividual: [],
+      packageMetaFromDirs: [],
+      packageReplacements: [],
+      extraMetapackages: [],
+      skipTags: {},
+      fixVersions: {},
+      transform: {},
+      ...overrides
+    });
+
+    function recorder(recordedTags, remoteTags = recordedTags) {
+      const refs = {
+        remoteTags: jest.fn(() => remoteTags),
+        isRecorded: jest.fn(tag => recordedTags.includes(tag)),
+        built: jest.fn(),
+        failed: jest.fn(),
+        done: jest.fn(),
+      };
+      return {refs, forInstruction: jest.fn().mockResolvedValue(refs)};
+    }
+
+    test('builds only tags that are not recorded, and reports what each produced', async () => {
+      const refRecorder = recorder(['1.0.0'], ['1.0.0', '2.0.0', '2.1.0']);
+      const failure = {message: 'No packages built for 2.1.0'};
+      createPackagesForRef
+        .mockResolvedValueOnce({'magento/module-a': '2.0.0'})
+        .mockRejectedValueOnce(failure);
+
+      await sut.processMirrorInstruction(instruction(), {composerRepoUrl: 'https://repo.test/'}, refRecorder);
+
+      expect(refRecorder.forInstruction).toHaveBeenCalledWith(expect.objectContaining({key: 'repo'}), 'https://repo.test/');
+      expect(createPackagesForRef.mock.calls.map(call => call[2].ref)).toEqual(['2.0.0', '2.1.0']);
+      expect(refRecorder.refs.built).toHaveBeenCalledWith('2.0.0', {'magento/module-a': '2.0.0'});
+      expect(refRecorder.refs.failed).toHaveBeenCalledWith('2.1.0', failure);
+      expect(refRecorder.refs.done).toHaveBeenCalled();
+    });
+
+    describe('with module failures', () => {
+      const TAGS = ['1.0.0', '2.0.0', '2.1.0'];
+      const GIT_FAILURE = 'Error executing git show: fatal: unable to access';
+
+      async function pendingTags(buildModules) {
+        createPackagesForRef.mockImplementation((_, __, release, onModuleFailure) => buildModules(release.ref, onModuleFailure));
+        const refRecorder = createRefRecorder({
+          listRemoteTags: async () => new Map(TAGS.map((tag, index) => [tag, String(index).repeat(40)])),
+          pendingFile: '/pending.json',
+        });
+
+        await sut.processMirrorInstruction(instruction(), {composerRepoUrl: 'https://repo.test/'}, refRecorder);
+
+        const [, pending] = fs.writeFileSync.mock.calls.find(([file]) => file === '/pending.json');
+        return Object.fromEntries(JSON.parse(pending).map(({tag, versions}) => [tag, versions]));
+      }
+
+      test('does not record a tag a module of which failed in a way that may not happen again', async () => {
+        const pending = await pendingTags(async (tag, onModuleFailure) => {
+          if (tag === '2.0.0') {
+            onModuleFailure(GIT_FAILURE);
+          }
+          return {'magento/module-a': tag};
+        });
+
+        expect(pending).toEqual({'1.0.0': [['magento/module-a', '1.0.0']], '2.1.0': [['magento/module-a', '2.1.0']]});
+        expect(console.log).toHaveBeenCalledWith('Modules', TAGS);
+      });
+
+      test('does not record a tag all modules of which failed in a way that may not happen again', async () => {
+        const pending = await pendingTags(async (tag, onModuleFailure) => {
+          if (tag === '2.0.0') {
+            onModuleFailure(GIT_FAILURE);
+            onModuleFailure(GIT_FAILURE);
+            throw {message: `No packages built for ${tag}`};
+          }
+          return {'magento/module-a': tag};
+        });
+
+        expect(Object.keys(pending)).toEqual(['1.0.0', '2.1.0']);
+      });
+
+      test('records a tag a module of which the generator rejected', async () => {
+        const pending = await pendingTags(async (tag, onModuleFailure) => {
+          if (tag === '2.0.0') {
+            onModuleFailure({message: 'Unable to find composer.json for 2.0.0, skipping Magento/b'});
+          }
+          if (tag === '2.1.0') {
+            onModuleFailure({message: 'Unable to find composer.json for 2.1.0, skipping Magento/b'});
+            throw {message: `No packages built for ${tag}`};
+          }
+          return {'magento/module-a': tag};
+        });
+
+        expect(pending).toEqual({
+          '1.0.0': [['magento/module-a', '1.0.0']],
+          '2.0.0': [['magento/module-a', '2.0.0']],
+          '2.1.0': [],
+        });
+      });
+    });
+
+    test('does not record a tag a metapackage of which has no release history yet', async () => {
+      const TAGS = ['1.0.0', '2.0.0', '2.1.0'];
+      fs.existsSync.mockImplementation(file => !String(file).endsWith('/product-community-edition/2.0.0.json'));
+      createPackagesForRef.mockImplementation(async (_, __, release) => ({'magento/module-a': release.ref}));
+      const refRecorder = createRefRecorder({
+        listRemoteTags: async () => new Map(TAGS.map((tag, index) => [tag, String(index).repeat(40)])),
+        pendingFile: '/pending.json',
+      });
+
+      await sut.processMirrorInstruction(instruction({
+        requireHistory: ['product-community-edition'],
+        extraMetapackages: [{name: 'product-community-edition', transform: []}],
+      }), {composerRepoUrl: 'https://repo.test/'}, refRecorder);
+
+      const [, pending] = fs.writeFileSync.mock.calls.find(([file]) => file === '/pending.json');
+      expect(JSON.parse(pending).map(({tag}) => tag)).toEqual(['1.0.0', '2.1.0']);
+    });
+
+    test('does not clone or tag a repository whose tags are all recorded', async () => {
+      const refRecorder = recorder(['1.0.0', '2.0.0', '1.0.0-p1'], ['0.9.0', '1.0.0', '2.0.0']);
+
+      await sut.processMirrorInstruction(
+        instruction({extraRefToRelease: [{ref: 'a'.repeat(40), release: '1.0.0-p1'}]}),
+        {composerRepoUrl: 'https://repo.test/'},
+        refRecorder
+      );
+
+      expect(repo.listTags).not.toHaveBeenCalled();
+      expect(repo.createTagForRef).not.toHaveBeenCalled();
+      expect(createPackagesForRef).not.toHaveBeenCalled();
+      expect(refRecorder.refs.done).toHaveBeenCalled();
+    });
+
+    test('creates only the extra ref tags that are not recorded', async () => {
+      const refRecorder = recorder(['1.0.0-p1'], ['1.0.0']);
+
+      await sut.processMirrorInstruction(
+        instruction({extraRefToRelease: [{ref: 'abc', release: '1.0.0-p1'}, {ref: 'def', release: '1.0.0-p2'}]}),
+        {composerRepoUrl: 'https://repo.test/'},
+        refRecorder
+      );
+
+      expect(repo.createTagForRef).toHaveBeenCalledTimes(1);
+      expect(repo.createTagForRef).toHaveBeenCalledWith('https://github.com/test/repo.git', 'def', '1.0.0-p2', 'Mage-OS Extra Ref', undefined);
+    });
+
+    test('does not replace files in a published package it did not build', async () => {
+      isPublished.mockReturnValueOnce(true);
+      fs.existsSync.mockReturnValue(false);
+
+      await expect(sut.processMirrorInstruction(
+        instruction({packageDirs: [], packageReplacements: [{name: 'vendor/pkg', version: '1.0.0', files: ['file.txt']}]}),
+        {composerRepoUrl: 'https://repo.test/'}
+      )).resolves.toBeUndefined();
+      expect(isPublished).toHaveBeenCalledWith('vendor/pkg', '1.0.0');
+    });
+
+    test('does not copy additional packages that are published', async () => {
+      fs.existsSync.mockImplementation(file => !file.endsWith('.zip'));
+      fs.readdir.mockImplementation((_, cb) => cb(null, ['published.zip', 'new.zip']));
+      isPublishedArchive.mockImplementation(async relativePath => relativePath === 'additional/published.zip');
+
+      await sut.copyAdditionalPackages('/test/archive');
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(fs.copyFile).toHaveBeenCalledTimes(1);
+      expect(fs.copyFile).toHaveBeenCalledWith(expect.stringContaining('new.zip'), '/test/archive/additional/new.zip', expect.any(Function));
     });
   });
 });

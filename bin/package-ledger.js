@@ -8,13 +8,14 @@ const fs = require('fs');
 const path = require('path');
 const parseOptions = require('parse-options');
 const ledger = require('../src/package-ledger');
+const refLedger = require('../src/ref-ledger');
 
 const options = parseOptions(
-  `command $ledger $satisOutputDir $packagesDir $repoUrl $mode $expectDiff $times $defaultTime $target $mageosRelease $publishTag @allowAliasRepoint @update @checkTimes @help|h`,
+  `command $ledger $satisOutputDir $packagesDir $repoUrl $baseUrl $mode $expectDiff $times $defaultTime $target $mageosRelease $publishTag $refs $pendingRefs @allowAliasRepoint @incremental @update @checkTimes @help|h`,
   process.argv
 );
 
-const commands = {guard, seed, verify, audit, bootstrap};
+const commands = {guard, base, seed, verify, audit, bootstrap};
 
 if (options.help || !commands[options.command] || !options.ledger) {
   console.log(`Maintain and check the package ledger of a composer repository.
@@ -24,6 +25,8 @@ Usage:
 
 Commands:
   guard      Check the inputs of a deploy before anything is built
+  base       Fetch the packages.json and include files of the live repository into an empty satis output dir,
+             for an incremental build, and check them against the ledger
   seed       Write the published-time of every ledger entry into an empty satis output dir, before running satis
   verify     Compare the packages satis was run over against the ledger, before deploying them
   audit      Compare the metadata a live repository serves against the ledger
@@ -31,14 +34,21 @@ Commands:
 
 Options:
   --ledger=            The ledger file, for example resource/ledger/mirror.tsv
-  --satisOutputDir=    seed, verify: The satis output dir (default: build)
+  --satisOutputDir=    base, seed, verify: The satis output dir (default: build)
   --packagesDir=       verify: The dir containing the package archives (default: {satisOutputDir}/packages)
-  --repoUrl=           verify, audit, bootstrap: Repository base URL (for example https://mirror.mage-os.org/)
+  --repoUrl=           base, verify, audit, bootstrap: Repository base URL (for example https://mirror.mage-os.org/)
+  --baseUrl=           base: Where to fetch the live metadata from (default: --repoUrl)
   --mode=              verify: "gate" fails on changed or missing published packages, "report" only lists them (default: gate)
   --expectDiff=        verify: Comma separated globs of archive paths that are expected to differ from the ledger
   --allowAliasRepoint  verify: Accept changed magento/* alias metapackages that require the highest mage-os/* version
                        replacing them in this build
+  --incremental        verify: Check versions without an archive in --packagesDir by their metadata,
+                       as an incremental build only contains the archives it built
   --update             verify: Write new and changed versions to the ledger if the gate passed
+  --refs=              verify: The ref ledger to add the tags in --pendingRefs to on --update,
+                       for example resource/ledger/mirror-refs.tsv
+  --pendingRefs=       verify: The tags the generator processed (its --refsOut file). Only tags all of whose
+                       versions are in the updated ledger are recorded
   --checkTimes         audit: Also check the p2 metadata composer 2 reads, including the published-time of
                        every version (one request per package)
   --target=            guard: "production" or "preview"
@@ -57,12 +67,20 @@ function requireOption(name) {
   return options[name];
 }
 
-async function fetchJson(url) {
+async function fetchOk(url) {
   const response = await fetch(url);
   if (!response.ok) {
     throw Object.assign(new Error(`HTTP ${response.status} for ${url}`), {status: response.status});
   }
-  return response.json();
+  return response;
+}
+
+async function fetchJson(url) {
+  return (await fetchOk(url)).json();
+}
+
+async function fetchText(url) {
+  return (await fetchOk(url)).text();
 }
 
 function report(results, title) {
@@ -93,6 +111,32 @@ async function guard() {
   failures.length > 0 ? fail(failures) : console.log('Deploy inputs are fine');
 }
 
+async function base() {
+  const repoUrl = requireOption('repoUrl');
+  const baseUrl = options.baseUrl || repoUrl;
+  const satisOutputDir = options.satisOutputDir || 'build';
+  const rows = ledger.readLedger(options.ledger);
+  let files;
+  try {
+    files = await ledger.fetchBaseMetadata(baseUrl, fetchText);
+  } catch (exception) {
+    return fail([
+      exception.message || String(exception),
+      `Could not fetch the live metadata of ${baseUrl}. Retry, or deploy with full_rebuild if the repository has no valid metadata`,
+    ]);
+  }
+  const {results, failures} = ledger.baseMetadataFailures(rows, files, repoUrl);
+  results && report(results, `Live metadata of ${baseUrl} against ${path.basename(options.ledger)}`);
+  if (failures.length > 0) {
+    return fail([
+      ...failures,
+      `The live metadata of ${baseUrl} does not match the ledger, so an incremental build can not be based on it. Deploy with full_rebuild`,
+    ]);
+  }
+  ledger.writeBaseMetadata(files, satisOutputDir);
+  console.log(`Wrote the live metadata of ${rows.length} versions to ${satisOutputDir}`);
+}
+
 async function seed() {
   const count = ledger.writeSeeds(ledger.readLedger(options.ledger), options.satisOutputDir || 'build');
   console.log(`Seeded published-time for ${count} package metadata files`);
@@ -106,22 +150,38 @@ async function verify() {
   if (options.update && mode !== 'gate') {
     throw new Error('--update requires --mode=gate');
   }
+  if (options.pendingRefs && !(options.update && options.refs)) {
+    throw new Error('--pendingRefs requires --update and --refs');
+  }
   const satisOutputDir = options.satisOutputDir || 'build';
+  const repoUrl = requireOption('repoUrl');
   const results = await ledger.verifyBuild(ledger.readLedger(options.ledger), {
     satisOutputDir,
     packagesDir: options.packagesDir || path.join(satisOutputDir, 'packages'),
-    repoUrl: requireOption('repoUrl'),
+    repoUrl,
     expectDiff: (options.expectDiff || '').split(',').filter(Boolean),
     allowAliasRepoint: options.allowAliasRepoint,
+    incremental: options.incremental,
   });
   report(results, `Package ledger ${path.basename(options.ledger)} (${mode})`);
 
-  const failures = ledger.gateFailures(results);
+  const failures = [
+    ...ledger.packagesJsonProblems(JSON.parse(fs.readFileSync(path.join(satisOutputDir, 'packages.json'), 'utf8')), repoUrl),
+    ...ledger.gateFailures(results),
+  ];
   if (mode === 'gate' && failures.length > 0) {
     return fail(failures);
   }
   if (options.update) {
-    ledger.writeLedger(options.ledger, ledger.nextRows(results));
+    const rows = ledger.nextRows(results);
+    if (options.pendingRefs) {
+      const pending = JSON.parse(fs.readFileSync(options.pendingRefs, 'utf8'));
+      const merged = refLedger.mergeRefs(refLedger.readRefs(options.refs), pending, rows);
+      refLedger.writeRefs(options.refs, merged.rows);
+      console.log(`Recorded ${merged.recorded} tags in ${options.refs}`);
+      merged.notPublished.forEach(ref => console.log(`Not recorded, it built versions that are not in the ledger: ${ref}`));
+    }
+    ledger.writeLedger(options.ledger, rows);
     console.log(`Updated ${options.ledger}`);
   }
 }

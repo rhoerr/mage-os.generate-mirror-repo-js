@@ -34,11 +34,17 @@ on:
         required: false
         default: false
         type: boolean
+      full_rebuild:
+        description: 'Production only: rebuild every package instead of adding the new ones to the live metadata. Previews always rebuild everything'
+        required: false
+        default: false
+        type: boolean
 
 # One release build per target repo at a time; never auto-cancel a release
-# mid-deploy or mid-tag-push
+# mid-deploy or mid-tag-push. The target is production whenever the ledger is recorded, as each
+# production build adds to the metadata the previous one uploaded.
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.repo || 'https://preview-repo.mage-os.org/' }}
+  group: ${{ github.workflow }}-${{ inputs.repo == 'https://repo.mage-os.org/' && 'production' || 'preview' }}
   cancel-in-progress: false
 
 jobs:
@@ -59,6 +65,7 @@ jobs:
       release_refs_file: ${{ inputs.release_refs_file }}
       ledger: release
       enforce_ledger: ${{ inputs.repo == 'https://repo.mage-os.org/' }}
+      full_rebuild: ${{ inputs.full_rebuild == true }}
 
     secrets:
       SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}

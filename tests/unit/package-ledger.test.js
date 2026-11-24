@@ -24,6 +24,7 @@ function row(overrides = {}) {
     path: `${name}-${version}.zip`,
     sha1: sha1(`${name} ${version}`),
     sha256: '',
+    'metadata-sha256': sut.metadataSha256({name, version}),
     'published-time': '2024-05-01T10:00:00+00:00',
     source: 'tag',
     ...overrides,
@@ -40,6 +41,7 @@ function entryFor(ledgerRow, overrides = {}) {
     sha256: sha256(`${ledgerRow.name} ${ledgerRow.version}`),
     shasum: ledgerRow.sha1,
     publishedTime: ledgerRow['published-time'],
+    metadataSha256: ledgerRow['metadata-sha256'],
     ...overrides,
   };
 }
@@ -102,6 +104,7 @@ describe('package-ledger', () => {
     it.each([
       ['sha1', {sha1: 'abc'}],
       ['sha256', {sha256: 'abc'}],
+      ['metadata-sha256', {'metadata-sha256': ''}],
       ['published-time without UTC offset', {'published-time': '2024-05-01T10:00:00-05:00'}],
       ['published-time that is no date', {'published-time': '2024-13-41T10:00:00+00:00'}],
       ['source', {source: 'guess'}],
@@ -118,7 +121,7 @@ describe('package-ledger', () => {
     it('rejects a file with a wrong header or field count', () => {
       const text = sut.formatLedger([row()]);
       expect(() => sut.parseLedger(text.replace('name\t', 'package\t'))).toThrow(/header/);
-      expect(() => sut.parseLedger(text + 'acme/alpha\t1.0.0\n')).toThrow(/expected 8 fields/);
+      expect(() => sut.parseLedger(text + 'acme/alpha\t1.0.0\n')).toThrow(/expected 9 fields/);
     });
 
     it('writes and reads a ledger file, creating the directory', () => {
@@ -167,7 +170,59 @@ describe('package-ledger', () => {
     });
   });
 
+  describe('metadataSha256', () => {
+    const composerJson = {
+      name: 'acme/alpha',
+      description: 'Not hashed',
+      version: '1.0.0',
+      require: {php: '>=8.1', 'Acme/Beta': '^2.0'},
+      'require-dev': {},
+      autoload: {'psr-4': {'Acme\\Alpha\\': ''}, files: ['registration.php']},
+      extra: {map: {}, 'branch-alias': {'dev-main': '1.0-dev'}},
+    };
+
+    // What satis writes for that composer.json
+    const satisEntry = {
+      name: 'acme/alpha',
+      version: '1.0.0',
+      version_normalized: '1.0.0.0',
+      dist: {type: 'zip', url: `${REPO_URL}packages/acme/alpha-1.0.0.zip`, shasum: sha1('a')},
+      require: {'acme/beta': '^2.0', php: '>=8.1'},
+      type: 'library',
+      extra: {'branch-alias': {'dev-main': '1.0-dev'}, map: []},
+      autoload: {files: ['registration.php'], 'psr-4': {'Acme\\Alpha\\': ''}},
+      description: 'Not hashed either',
+      'published-time': '2024-05-01T10:00:00+00:00',
+    };
+
+    it('is the same for a composer.json and the satis metadata generated from it', async () => {
+      const zip = new JSZip();
+      zip.file('composer.json', JSON.stringify(composerJson, null, 4));
+      const archive = path.join(dir, 'alpha.zip');
+      fs.writeFileSync(archive, await zip.generateAsync({type: 'nodebuffer'}));
+      const {readComposerJsonFromZip} = require('../../src/package-aliases');
+
+      expect(sut.metadataSha256(await readComposerJsonFromZip(archive))).toBe(sut.metadataSha256(satisEntry));
+      expect(sut.metadataSha256(satisEntry)).toBe('76a97c182ddb7808cbc9564930f5207db6592b977c775242a8065776ea34743b');
+    });
+
+    it.each([
+      ['a require constraint', {require: {...composerJson.require, php: '>=8.2'}}],
+      ['the type', {type: 'magento2-module'}],
+      ['the autoload files order', {autoload: {...composerJson.autoload, files: ['a.php', 'registration.php']}}],
+      ['the version', {version: '1.0.1'}],
+    ])('changes with %s', (_, overrides) => {
+      expect(sut.metadataSha256({...composerJson, ...overrides})).not.toBe(sut.metadataSha256(composerJson));
+    });
+  });
+
   describe('classify', () => {
+    it('flags an unchanged archive whose metadata does not match the ledger', () => {
+      const results = sut.classify([row()], [entryFor(row(), {metadataSha256: sha256('other')})], {now: NOW});
+      expect(results[0].status).toBe(STATUS.UNCHANGED);
+      expect(results[0].problems).toEqual([expect.stringMatching(/metadata-sha256 .* does not match the ledger/)]);
+    });
+
     it('reports a build matching the ledger as unchanged', () => {
       const rows = [row(), row({version: '1.1.0'})];
       const results = sut.classify(rows, rows.map(r => entryFor(r)), {now: NOW});
@@ -524,10 +579,12 @@ describe('package-ledger', () => {
         {
           name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip',
           shasum: sha1('a'), publishedTime: '2024-05-01T10:00:00+00:00',
+          metadataSha256: sut.metadataSha256({name: 'acme/alpha', version: '1.0.0'}),
         },
         {
           name: 'acme/alpha', version: '1.1-dev', version_normalized: '1.1.0.0-dev', path: 'acme/alpha-1.1-dev.zip',
           shasum: sha1('b'), publishedTime: '2024-06-01T10:00:00+00:00',
+          metadataSha256: sut.metadataSha256({name: 'acme/alpha', version: '1.1-dev'}),
         },
       ]);
     });
@@ -689,10 +746,14 @@ describe('package-ledger', () => {
 
       const entries = await sut.fetchRepoEntries('https://repo.example.com', fetchJson);
 
-      expect(entries).toEqual([
-        {name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip', sha1: sha1('acme/alpha 1.0.0')},
-        {name: 'acme/alpha', version: '1.1.0', version_normalized: '1.1.0.0', path: 'acme/alpha-1.1.0.zip', sha1: sha1('acme/alpha 1.1.0')},
-      ]);
+      expect(entries).toEqual(['1.0.0', '1.1.0'].map(v => ({
+        name: 'acme/alpha',
+        version: v,
+        version_normalized: `${v}.0`,
+        path: `acme/alpha-${v}.zip`,
+        sha1: sha1(`acme/alpha ${v}`),
+        metadataSha256: sut.metadataSha256({name: 'acme/alpha', version: v}),
+      })));
     });
 
     it('reads versions and published-time from the p2 metadata', async () => {
@@ -735,17 +796,58 @@ describe('package-ledger', () => {
 
       expect(sut.summarize(sut.classify(rows, live))).toMatchObject({unchanged: 1, modified: 1, new: 1, missing: 1});
     });
+
+    it.each(['../all.json', '/etc/all.json'])('does not fetch the include file %s outside of the repository', async include => {
+      const fetchJson = fakeFetch({[`${REPO_URL}packages.json`]: {includes: {[include]: {sha1: 'abc'}}}});
+      await expect(sut.fetchRepoEntries(REPO_URL, fetchJson)).rejects.toThrow(/outside/);
+      expect(fetchJson).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('packagesJsonProblems', () => {
+    const SATIS = {
+      packages: [],
+      includes: {'include/all$0123456789abcdef0123456789abcdef01234567.json': {sha1: '0123456789abcdef0123456789abcdef01234567'}},
+      'metadata-url': '/p2/%package%.json',
+      'available-packages': ['acme/alpha', 'acme/beta'],
+    };
+
+    it('accepts what satis writes', () => {
+      expect(sut.packagesJsonProblems(SATIS, 'https://repo.example.com')).toEqual([]);
+      expect(sut.packagesJsonProblems({...SATIS, 'metadata-url': '/sub/p2/%package%.json'}, 'https://repo.example.com/sub/')).toEqual([]);
+    });
+
+    it.each([
+      ['providers', {'providers-url': '/p/%package%$%hash%.json', providers: {}}, ['packages.json: unexpected providers-url', 'packages.json: unexpected providers']],
+      ['repositories', {repositories: [{type: 'vcs', url: 'https://evil.example.com/repo.git'}]}, ['packages.json: unexpected repositories']],
+      ['inline packages', {packages: {'acme/alpha': {'6.6.6': {}}}}, ['packages.json: packages is not empty']],
+      ['another metadata-url', {'metadata-url': 'https://evil.example.com/p2/%package%.json'}, ['packages.json: metadata-url is "https://evil.example.com/p2/%package%.json", not "/p2/%package%.json"']],
+      ['an include file above the repository', {includes: {'../all.json': {}}}, ['packages.json: include file outside of the repository: ../all.json']],
+      ['an absolute include file', {includes: {'/all.json': {}}}, ['packages.json: include file outside of the repository: /all.json']],
+      ['includes that are no object', {includes: ['include/all.json']}, ['packages.json: includes is not an object']],
+      ['available-packages that are no list', {'available-packages': {'acme/alpha': true}}, ['packages.json: available-packages is not a list of package names']],
+    ])('rejects %s', (_, change, problems) => {
+      expect(sut.packagesJsonProblems({...SATIS, ...change}, REPO_URL)).toEqual(problems);
+    });
+
+    it('rejects anything but an object', () => {
+      expect(sut.packagesJsonProblems([], REPO_URL)).toEqual(['packages.json is not an object']);
+      expect(sut.packagesJsonProblems(null, REPO_URL)).toEqual(['packages.json is not an object']);
+    });
   });
 
   describe('bootstrapRows', () => {
-    const entry = {name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip', sha1: sha1('a')};
+    const metadataSha256 = sut.metadataSha256({name: 'acme/alpha', version: '1.0.0'});
+    const entry = {name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', path: 'acme/alpha-1.0.0.zip', sha1: sha1('a'), metadataSha256};
     const DEFAULT = '2026-01-01T00:00:00+00:00';
 
     it('uses the known publication time, normalized to UTC', () => {
       const times = sut.parseTimes('acme/alpha\t1.0.0\t2024-05-01T05:00:00-05:00\tupstream\n');
+      const {metadataSha256: _, ...fields} = entry;
       expect(sut.bootstrapRows([entry], times, {now: NOW})).toEqual([{
-        ...entry,
+        ...fields,
         sha256: '',
+        'metadata-sha256': metadataSha256,
         'published-time': '2024-05-01T10:00:00+00:00',
         source: 'upstream',
       }]);
@@ -791,6 +893,214 @@ describe('package-ledger', () => {
       expect(report).toContain('### Ledger');
       expect(report).toContain('| status | versions |');
       expect(report).toContain('… and 1 more');
+    });
+  });
+  describe('base metadata', () => {
+    const TIME = '2024-05-01T10:00:00+00:00';
+    const ledgerRows = [row(), row({version: '1.1.0'})];
+    const metadataOf = (ledgerRow, extra = {}) => ({
+      name: ledgerRow.name,
+      version: ledgerRow.version,
+      version_normalized: ledgerRow.version_normalized,
+      dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRow.path}`, shasum: ledgerRow.sha1},
+      'published-time': ledgerRow['published-time'],
+      ...extra,
+    });
+    const filesOf = versions => [
+      {file: 'packages.json', text: JSON.stringify({includes: {'include/all$abc.json': {sha1: 'abc'}}})},
+      {file: 'include/all$abc.json', text: JSON.stringify({packages: {'acme/alpha': Object.fromEntries(versions.map(v => [v.version, v]))}})},
+    ];
+    const failuresOf = versions => sut.baseMetadataFailures(ledgerRows, filesOf(versions), REPO_URL).failures;
+
+    it('accepts metadata with exactly the ledger versions', () => {
+      expect(failuresOf(ledgerRows.map(r => metadataOf(r)))).toEqual([]);
+    });
+
+    it('fails on a changed require', () => {
+      expect(failuresOf([metadataOf(ledgerRows[0], {require: {'acme/evil': '*'}}), metadataOf(ledgerRows[1])]))
+        .toEqual(['1 version(s) with a published-time or shasum problem']);
+    });
+
+    it('fails on a stale copy without a ledger version', () => {
+      expect(failuresOf([metadataOf(ledgerRows[0])])).toEqual(['1 already published version(s) missing from the build']);
+    });
+
+    it('fails on a version the ledger does not have', () => {
+      const unknown = row({version: '6.6.6'});
+      expect(failuresOf([...ledgerRows.map(r => metadataOf(r)), metadataOf(unknown, {'published-time': sut.formatTime(new Date())})]))
+        .toEqual(['1 version(s) that are not in the ledger']);
+    });
+
+    it('fails on a changed archive or published-time', () => {
+      expect(failuresOf([metadataOf(ledgerRows[0], {dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: sha1('x')}}), metadataOf(ledgerRows[1])]))
+        .toEqual(['1 already published version(s) modified']);
+      expect(failuresOf([metadataOf(ledgerRows[0], {'published-time': '2025-01-01T00:00:00+00:00'}), metadataOf(ledgerRows[1])]))
+        .toEqual(['1 version(s) with a published-time or shasum problem']);
+    });
+
+    it('fails on metadata satis generated without published-time', () => {
+      const withoutTime = ledgerRows.map(r => {
+        const {'published-time': _, ...version} = metadataOf(r);
+        return version;
+      });
+      expect(failuresOf(withoutTime)).toEqual(['2 version(s) with a published-time or shasum problem']);
+    });
+
+    it('fetches packages.json and its include files past any cache', async () => {
+      const files = filesOf(ledgerRows.map(r => metadataOf(r)));
+      const fetchText = jest.fn(async url => {
+        const file = url.replace('http://127.0.0.1:1/', '').replace(/\?nocache=\d+$/, '');
+        return files.find(f => f.file === file).text;
+      });
+
+      expect(await sut.fetchBaseMetadata('http://127.0.0.1:1', fetchText)).toEqual(files);
+      expect(fetchText.mock.calls.map(([url]) => url)).toEqual([
+        expect.stringMatching(/^http:\/\/127\.0\.0\.1:1\/packages\.json\?nocache=\d+$/),
+        expect.stringMatching(/^http:\/\/127\.0\.0\.1:1\/include\/all\$abc\.json\?nocache=\d+$/),
+      ]);
+    });
+
+    it('does not fetch an include file outside of the repository', async () => {
+      const fetchText = async () => JSON.stringify({includes: {'../all.json': {}}});
+      await expect(sut.fetchBaseMetadata('http://127.0.0.1:1/', fetchText)).rejects.toThrow(/outside/);
+    });
+
+    it('writes the fetched files where satis reads its previous build from', () => {
+      const files = filesOf(ledgerRows.map(r => metadataOf(r)));
+      sut.writeBaseMetadata(files, dir);
+
+      expect(fs.readFileSync(path.join(dir, 'include/all$abc.json'), 'utf8')).toBe(files[1].text);
+      expect(sut.readIncludedVersions(dir).map(v => v.version)).toEqual(['1.0.0', '1.1.0']);
+      expect(() => sut.writeBaseMetadata(files, dir)).toThrow(/already exists/);
+    });
+
+    it('accepts every field satis writes for the packages built here', () => {
+      const full = metadataOf(ledgerRows[0], {
+        require: {'php': '~8.3.0'}, 'require-dev': {'acme/test': '*'}, replace: {'acme/old': '*'}, provide: {'acme/api': '1.0'},
+        conflict: {'acme/bad': '*'}, suggest: {'acme/extra': 'More'}, type: 'magento2-module',
+        autoload: {'psr-4': {'Acme\\Alpha\\': ''}}, 'autoload-dev': {'psr-4': {'Acme\\Alpha\\Test\\': 'Test/'}},
+        extra: {map: [['a', 'b']]}, bin: ['bin/alpha'], license: ['OSL-3.0'], description: 'Alpha', abandoned: true,
+        scripts: {test: 'phpunit'}, authors: [{name: 'Acme'}], support: {issues: 'https://acme.example.com'},
+        archive: {exclude: ['/Test']}, homepage: 'https://acme.example.com', keywords: ['alpha'],
+        funding: [{type: 'github', url: 'https://github.com/sponsors/acme'}],
+      });
+      const rows = [{...ledgerRows[0], 'metadata-sha256': sut.metadataSha256(full)}, ledgerRows[1]];
+      expect(sut.baseMetadataFailures(rows, filesOf([full, metadataOf(ledgerRows[1])]), REPO_URL).failures).toEqual([]);
+    });
+
+    it.each([
+      ['a source composer falls back to', {source: {type: 'git', url: 'https://evil.example.com/alpha.git', reference: 'main'}}, /unexpected source$/],
+      ['an include-path', {'include-path': ['../../evil']}, /unexpected include-path$/],
+      ['transport-options', {'transport-options': {ssl: {verify_peer: false}}}, /unexpected transport-options$/],
+      ['a notification-url', {'notification-url': 'https://evil.example.com/notify'}, /unexpected notification-url$/],
+      ['a dist reference', {dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: ledgerRows[0].sha1, reference: 'abc'}}, /unexpected dist reference$/],
+      ['dist mirrors', {dist: {type: 'zip', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: ledgerRows[0].sha1, mirrors: [{url: 'https://evil.example.com/%package%', preferred: true}]}}, /unexpected dist mirrors$/],
+      ['a dist type other than zip', {dist: {type: 'tar', url: `${REPO_URL}packages/${ledgerRows[0].path}`, shasum: ledgerRows[0].sha1}}, /dist type "tar" is not zip$/],
+    ])('rejects a version with %s', (_, extra, message) => {
+      expect(sut.baseMetadataFailures(ledgerRows, filesOf([metadataOf(ledgerRows[0], extra), metadataOf(ledgerRows[1])]), REPO_URL)).toEqual({
+        results: null,
+        failures: [expect.stringMatching(message)],
+      });
+    });
+
+    it('fails on a packages.json satis did not write', () => {
+      const [packagesJson, include] = filesOf(ledgerRows.map(r => metadataOf(r)));
+      const tampered = {file: 'packages.json', text: JSON.stringify({...JSON.parse(packagesJson.text), 'providers-url': '/p/%package%$%hash%.json'})};
+      expect(sut.baseMetadataFailures(ledgerRows, [tampered, include], REPO_URL).failures).toEqual(['packages.json: unexpected providers-url']);
+    });
+
+    it('rejects a version without dist, which is what a seed satis did not replace looks like', () => {
+      const files = filesOf([{name: 'acme/alpha', version: '1.0.0', version_normalized: '1.0.0.0', 'published-time': TIME}]);
+      expect(sut.baseMetadataFailures(ledgerRows, files, REPO_URL)).toEqual({
+        results: null,
+        failures: [expect.stringMatching(/no dist/)],
+      });
+    });
+  });
+
+  describe('incremental verifyBuild', () => {
+    const TIME = '2024-05-01T10:00:00+00:00';
+
+    function writeJson(file, data) {
+      fs.mkdirSync(path.dirname(path.join(dir, file)), {recursive: true});
+      fs.writeFileSync(path.join(dir, file), JSON.stringify(data));
+    }
+
+    async function zipOf(composer) {
+      const zip = new JSZip();
+      zip.file('composer.json', JSON.stringify(composer));
+      return zip.generateAsync({type: 'nodebuffer'});
+    }
+
+    // versions: {name, version, content|null, time, extra}; null content means no archive in the build
+    function writeBuild(versions) {
+      const names = [...new Set(versions.map(v => v.name))];
+      writeJson('packages.json', {'available-packages': names});
+      for (const name of names) {
+        writeJson(`p2/${name}.json`, {packages: {[name]: versions.filter(v => v.name === name).map(v => ({
+          name,
+          version: v.version,
+          version_normalized: `${v.version}.0`,
+          dist: {type: 'zip', url: `${REPO_URL}packages/${name}-${v.version}.zip`, shasum: v.shasum || sha1(v.content)},
+          'published-time': v.time || TIME,
+          ...(v.extra || {}),
+        }))}});
+      }
+      for (const v of versions.filter(v => v.content !== null)) {
+        fs.mkdirSync(path.join(dir, 'packages', path.dirname(v.name)), {recursive: true});
+        fs.writeFileSync(path.join(dir, 'packages', `${v.name}-${v.version}.zip`), v.content);
+      }
+    }
+
+    const options = extra => ({satisOutputDir: dir, packagesDir: path.join(dir, 'packages'), repoUrl: REPO_URL, ...extra});
+
+    it('checks versions without an archive by their metadata', async () => {
+      const published = row();
+      const stamped = sut.formatTime(new Date());
+      writeBuild([
+        {name: 'acme/alpha', version: '1.0.0', content: null, shasum: published.sha1},
+        {name: 'acme/alpha', version: '2.0.0', content: 'alpha 2.0.0', time: stamped},
+      ]);
+
+      await expect(sut.verifyBuild([published], options())).rejects.toThrow(/ENOENT/);
+      const results = await sut.verifyBuild([published], options({incremental: true}));
+
+      expect(statusOf(results, 'acme/alpha', '1.0.0')).toBe(STATUS.UNCHANGED);
+      expect(statusOf(results, 'acme/alpha', '2.0.0')).toBe(STATUS.NEW);
+      expect(sut.gateFailures(results)).toEqual([]);
+      expect(sut.nextRows(results).map(r => [r.version, r.sha256])).toEqual([['1.0.0', ''], ['2.0.0', sha256('alpha 2.0.0')]]);
+    });
+
+    it('fails a version without an archive that is not an unchanged published version', async () => {
+      const published = row();
+      writeBuild([
+        {name: 'acme/alpha', version: '1.0.0', content: null, shasum: published.sha1, extra: {require: {'acme/evil': '*'}}},
+        {name: 'acme/alpha', version: '2.0.0', content: null, shasum: sha1('x'), time: sut.formatTime(new Date())},
+      ]);
+
+      const results = await sut.verifyBuild([published], options({incremental: true}));
+
+      expect(results.find(r => r.entry.version === '1.0.0').problems).toEqual([expect.stringMatching(/^metadata-sha256/)]);
+      expect(results.find(r => r.entry.version === '2.0.0').problems).toEqual(['new version has no archive in the build']);
+    });
+
+    it('accepts an alias repointed at a version replacing it that is only in the metadata', async () => {
+      const aliasOld = await zipOf({name: 'magento/module-a', type: 'metapackage', version: '100.0.1', require: {'mage-os/module-a': '1.0.0'}});
+      const aliasNew = await zipOf({name: 'magento/module-a', type: 'metapackage', version: '100.0.1', require: {'mage-os/module-a': '2.0.0'}});
+      const rows = [
+        row({name: 'magento/module-a', version: '100.0.1', sha1: sha1(aliasOld)}),
+        row({name: 'mage-os/module-a', version: '2.0.0'}),
+      ];
+      writeBuild([
+        {name: 'mage-os/module-a', version: '2.0.0', content: null, shasum: rows[1].sha1, extra: {replace: {'magento/module-a': '100.0.1'}}},
+        {name: 'magento/module-a', version: '100.0.1', content: aliasNew},
+      ]);
+      rows[1]['metadata-sha256'] = sut.metadataSha256({name: 'mage-os/module-a', version: '2.0.0', replace: {'magento/module-a': '100.0.1'}});
+
+      const results = await sut.verifyBuild(rows, options({incremental: true, allowAliasRepoint: true}));
+
+      expect(statusOf(results, 'magento/module-a', '100.0.1')).toBe(STATUS.REPOINTED);
+      expect(sut.gateFailures(results)).toEqual([]);
     });
   });
 });

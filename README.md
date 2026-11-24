@@ -138,7 +138,8 @@ docker build -t magece/mirror-repo-js .
 
 `resource/ledger/mirror.tsv` and `resource/ledger/release.tsv` record every package version published to
 https://mirror.mage-os.org and https://repo.mage-os.org. There is one line per version, with the archive path, its sha1
-and sha256, the `published-time` served to composer, and the source of that time: `build` for versions recorded by a
+and sha256, the `metadata-sha256` of the composer.json fields composer resolves with (name, version, type, the links,
+suggest, autoload, extra and bin), the `published-time` served to composer, and the source of that time: `build` for versions recorded by a
 deploy, or `upstream`, `tag`, `release` and `bootstrap` for versions published before the ledger existed.  
 The nightly repositories have no ledger.
 
@@ -151,6 +152,8 @@ The deploy workflow uses the ledger like this:
    - an already published package has different contents, or is missing from the build
    - the `published-time` of an already published version is not the one in the ledger
    - a new version has no `published-time`, or one that is not the time of the build
+   - `packages.json` or a version has anything satis does not write for these packages, a `source` say, or a `dist`
+     other than a zip with url and shasum
 
    New versions are fine. There is no override flag.  
    The one exception is a `magento/*` alias metapackage of the release repository. It may change if it is an alias
@@ -163,7 +166,37 @@ The deploy workflow uses the ledger like this:
    `record ledger` job of the same workflow run, and waits until the ledger is on the branch.
 4. The zips are uploaded first, then the metadata (`include/`, `p2/`, `packages.json`), then the Cloudflare cache is
    purged. Both uploads compare checksums, so a second run sends no unchanged zip. Zips are never deleted from the
-   server. The `delete` input only removes stale metadata.
+   server. The `delete` input only removes stale metadata, after the new `packages.json` is uploaded.
+
+### Incremental production deploys
+
+A production deploy only builds what the ledger does not have, and adds it to the metadata the repository serves:
+
+1. `package-ledger.js base` fetches the live `packages.json` and its include file, and checks that they contain every
+   ledger version with the ledger's sha1, `metadata-sha256` and `published-time`, no other version, and nothing
+   satis does not write.
+2. The generator skips the versions in the ledger and the tags in the ref ledger. The release build generates the
+   `magento/*` aliases from the live metadata and the new packages, and only writes aliases that are new or now point
+   at a newer `mage-os/*` version.
+3. Satis runs over the new archives only (`--repository-url`), and takes every other version from the live include file.
+4. The gate checks the versions that were not built by their metadata, and the new and repointed ones by their archive.
+
+The metadata is byte for byte the same as that of a full build.
+
+Run the workflow with `full_rebuild` to build everything, as before. Do that
+
+- for the first production deploy of a repository, as its live metadata has no `published-time` yet
+- when the base metadata check fails. The live metadata then does not match the ledger: a deploy failed after the
+  ledger was recorded, someone changed the server, or a CDN served an old copy. A full rebuild uploads metadata that
+  matches the ledger again, or fails the gate and shows what differs.
+- after fixing the generator for packages it could not build (see the ref ledger below)
+
+Do not re-run a deploy that failed after its ledger was recorded: the re-run checks against the ledger of the commit
+it started from, and stamps the new versions with a new time. Start a new run instead (see below).  
+If the live metadata can not be fetched at all, retry the deploy.
+
+Previews always rebuild everything. Only one deploy per target runs at a time, since each one builds on what the
+previous one uploaded.
 
 Deploys to the preview repositories use the ledger of the production repository and never change it. They always
 rebuild everything, deploy, and then fail the run if anything differs from the ledger, other than the project
@@ -186,7 +219,7 @@ Things to know when running the `Build, deploy & check Mirror` and `Build, deplo
   with a new time, which conflicts with the recorded ledger. Start a new run, which uses the recorded ledger. For a
   release, first run the `push-release-tag.yml` workflow with the release and the id of the failed run, which pushes
   the tag from that run's working copies artifact. Then leave `mageos_release` empty in the new run, as the guard
-  refuses a published release.
+  refuses a published release, and set `full_rebuild`, as the live metadata does not have the recorded versions.
 - The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
   installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
 
@@ -197,6 +230,7 @@ The reusable `deploy.yml` workflow takes these inputs:
 | `ledger` | `''` | Name of the ledger file in `resource/ledger`, without `.tsv`. Empty skips all ledger steps |
 | `enforce_ledger` | `true` | Fail on violations and record new versions. `false` is for the preview repositories: report, deploy, then fail on differences |
 | `delete` | `true` | Remove stale metadata that is not in the build. The release workflow sets `false` |
+| `full_rebuild` | `false` | Build every package instead of adding the new ones to the live metadata. Only changes deploys with `enforce_ledger` |
 
 To compare what a repository currently serves against the ledger, run
 
@@ -206,6 +240,24 @@ node bin/package-ledger.js audit --ledger=resource/ledger/mirror.tsv --repoUrl=h
 
 This checks the version list, the sha1 checksums and the download URLs. Add `--checkTimes` to also check the
 metadata files composer 2 reads, including each `published-time`.
+
+### Ref ledger
+
+`resource/ledger/mirror-refs.tsv` and `resource/ledger/release-refs.tsv` record the git tags the packages were built
+from: the build instruction, the tag, the commit it pointed at, and a fingerprint of the instruction's configuration.
+A deploy that passed the gate records the tags it processed if every version they produced is in the ledger. The
+`record ledger` job commits both files.
+
+The generators take these options for it:
+
+- `--ledger=FILE` does not build the versions in the package ledger again.
+- `--refs=FILE` does not read the recorded tags again. A recorded tag that moved or was deleted fails the build.
+  When the configuration of an instruction changes, all its tags are processed again.
+- `--refsOut=FILE` writes the tags the build processed, for `package-ledger.js verify --update --refs --pendingRefs`.
+- `--fullRebuild` builds every version and tag; the recorded commits are still checked.
+
+A tag is recorded even if a package of it failed in a way that repeats on the same commit, a missing composer.json
+for example. After fixing the generator for such a case, deploy with `full_rebuild` to build those packages.
 
 ## Process of building a new mirror release
 

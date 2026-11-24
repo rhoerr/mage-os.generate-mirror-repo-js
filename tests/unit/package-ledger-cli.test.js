@@ -28,6 +28,7 @@ describe('bin/package-ledger.js', () => {
       path: 'mage-os/product-community-edition-2.0.0.zip',
       sha1: sha1('published'),
       sha256: '',
+      'metadata-sha256': ledger.metadataSha256({name: 'mage-os/product-community-edition', version: '2.0.0'}),
       'published-time': TIME,
       source: 'tag',
     }]);
@@ -78,6 +79,76 @@ describe('bin/package-ledger.js', () => {
     });
   });
 
+  describe('verify --update with --pendingRefs', () => {
+    const refs = require('../../src/ref-ledger');
+    const name = 'mage-os/product-community-edition';
+    const commit = 'a'.repeat(40);
+    const fingerprint = 'f'.repeat(64);
+    let refsFile;
+    let pendingFile;
+
+    beforeEach(() => {
+      const build = path.join(dir, 'build');
+      fs.mkdirSync(path.join(build, 'p2', 'mage-os'), {recursive: true});
+      fs.mkdirSync(path.join(build, 'packages', 'mage-os'), {recursive: true});
+      fs.writeFileSync(path.join(build, 'packages.json'), JSON.stringify({'available-packages': [name]}));
+      fs.writeFileSync(path.join(build, 'p2', `${name}.json`), JSON.stringify({packages: {[name]: ['2.0.0', '2.1.0'].map(version => ({
+        name,
+        version,
+        version_normalized: `${version}.0`,
+        dist: {type: 'zip', url: `${REPO_URL}packages/${name}-${version}.zip`, shasum: sha1(version === '2.0.0' ? 'published' : 'new')},
+        'published-time': version === '2.0.0' ? TIME : ledger.formatTime(new Date()),
+      }))}}));
+      fs.writeFileSync(path.join(build, 'packages', `${name}-2.0.0.zip`), 'published');
+      fs.writeFileSync(path.join(build, 'packages', `${name}-2.1.0.zip`), 'new');
+      refsFile = path.join(dir, 'refs.tsv');
+      pendingFile = path.join(dir, 'pending.json');
+      refs.writeRefs(refsFile, []);
+    });
+
+    const pending = (tag, versions, overrides = {}) => ({instruction: 'magento2', tag, commit, fingerprint, versions, ...overrides});
+    const verify = () => run('verify', '--satisOutputDir=build', `--repoUrl=${REPO_URL}`, '--update', `--refs=${refsFile}`, `--pendingRefs=${pendingFile}`);
+
+    it('does not update the ledgers from a packages.json satis did not write', () => {
+      fs.writeFileSync(pendingFile, JSON.stringify([pending('2.1.0', [[name, '2.1.0']])]));
+      fs.writeFileSync(path.join(dir, 'build', 'packages.json'), JSON.stringify({
+        'available-packages': [name],
+        repositories: [{type: 'vcs', url: 'https://evil.example.com/repo.git'}],
+      }));
+      const before = fs.readFileSync(ledgerFile, 'utf8');
+      const result = verify();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('FAILED: packages.json: unexpected repositories');
+      expect(fs.readFileSync(ledgerFile, 'utf8')).toBe(before);
+      expect(refs.readRefs(refsFile)).toEqual([]);
+    });
+
+    it('records the tags whose versions are all in the updated ledger', () => {
+      fs.writeFileSync(pendingFile, JSON.stringify([
+        pending('2.1.0', [[name, '2.1.0']]),
+        pending('2.2.0', [[name, '2.2.0']]),
+      ]));
+      const result = verify();
+      expect(result.status).toBe(0);
+      expect(refs.readRefs(refsFile).map(row => row.tag)).toEqual(['2.1.0']);
+      expect(ledger.readLedger(ledgerFile).map(row => row.version)).toEqual(['2.0.0', '2.1.0']);
+    });
+
+    it('changes neither ledger when a recorded tag moved', () => {
+      refs.writeRefs(refsFile, [{instruction: 'magento2', tag: '2.0.0', commit, fingerprint}]);
+      fs.writeFileSync(pendingFile, JSON.stringify([pending('2.0.0', [[name, '2.0.0']], {commit: 'b'.repeat(40)})]));
+      const before = fs.readFileSync(ledgerFile, 'utf8');
+      expect(verify().status).toBe(2);
+      expect(fs.readFileSync(ledgerFile, 'utf8')).toBe(before);
+      expect(refs.readRefs(refsFile)[0].commit).toBe(commit);
+    });
+
+    it('requires --update and --refs', () => {
+      fs.writeFileSync(pendingFile, '[]');
+      expect(run('verify', '--satisOutputDir=build', `--repoUrl=${REPO_URL}`, `--pendingRefs=${pendingFile}`).status).toBe(2);
+    });
+  });
+
   describe('guard', () => {
     it.each([
       [['--target=production', '--mageosRelease=2.1.0', '--publishTag=true'], 0],
@@ -90,6 +161,74 @@ describe('bin/package-ledger.js', () => {
       [['--target=staging', '--publishTag=false'], 2],
     ])('with %j exits %i', (args, status) => {
       expect(run('guard', ...args).status).toBe(status);
+    });
+  });
+
+  describe('base', () => {
+    const http = require('http');
+    const {execFile} = require('child_process');
+    const name = 'mage-os/product-community-edition';
+    let server;
+    let baseUrl;
+    let served;
+
+    beforeEach(async () => {
+      const version = {
+        name,
+        version: '2.0.0',
+        version_normalized: '2.0.0.0',
+        dist: {type: 'zip', url: `${REPO_URL}packages/${name}-2.0.0.zip`, shasum: sha1('published')},
+        'published-time': TIME,
+      };
+      served = {
+        '/packages.json': JSON.stringify({includes: {'include/all$abc.json': {sha1: 'abc'}}}),
+        '/include/all$abc.json': JSON.stringify({packages: {[name]: {'2.0.0': version}}}),
+      };
+      server = http.createServer((request, response) => {
+        const file = decodeURIComponent(request.url.split('?')[0]);
+        response.writeHead(file in served ? 200 : 404);
+        response.end(served[file] || '');
+      });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+      baseUrl = `http://127.0.0.1:${server.address().port}/`;
+    });
+
+    afterEach(async () => {
+      await new Promise(resolve => server.close(resolve));
+    });
+
+    const base = () => new Promise(resolve => execFile(
+      process.execPath,
+      [CLI, 'base', `--ledger=${ledgerFile}`, `--repoUrl=${REPO_URL}`, `--baseUrl=${baseUrl}`, '--satisOutputDir=build'],
+      {cwd: dir, encoding: 'utf8'},
+      (error, stdout) => resolve({status: error ? error.code : 0, stdout})
+    ));
+
+    it('writes the live metadata that matches the ledger to the satis output dir', async () => {
+      const result = await base();
+      expect(result.status).toBe(0);
+      expect(fs.readFileSync(path.join(dir, 'build', 'include', 'all$abc.json'), 'utf8')).toBe(served['/include/all$abc.json']);
+      expect(fs.readFileSync(path.join(dir, 'build', 'packages.json'), 'utf8')).toBe(served['/packages.json']);
+    });
+
+    it.each([
+      ['a stale copy', () => served['/include/all$abc.json'] = JSON.stringify({packages: {}})],
+      ['a seed satis did not replace', () => served['/include/all$abc.json'] = JSON.stringify({packages: {[name]: {'2.0.0': {name, version: '2.0.0'}}}})],
+    ])('fails on %s and points at full_rebuild', async (_, change) => {
+      change();
+      const result = await base();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('Deploy with full_rebuild');
+      expect(fs.existsSync(path.join(dir, 'build'))).toBe(false);
+    });
+
+    it('asks for a retry when the metadata can not be fetched', async () => {
+      delete served['/include/all$abc.json'];
+      const result = await base();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('HTTP 404');
+      expect(result.stdout).toContain('Retry');
+      expect(fs.existsSync(path.join(dir, 'build'))).toBe(false);
     });
   });
 });

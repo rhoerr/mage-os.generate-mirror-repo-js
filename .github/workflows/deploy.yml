@@ -53,6 +53,11 @@ on:
         required: false
         default: true
         type: boolean
+      full_rebuild:
+        description: 'Build every package and run satis over all of them. Otherwise a deploy recording to the ledger only builds the versions the ledger does not have, and adds them to the live metadata'
+        required: false
+        default: false
+        type: boolean
 
     secrets:
       SERVER_SSH_KEY:
@@ -76,14 +81,18 @@ env:
   remote_dir: ${{ inputs.remote_dir }}
   repo: ${{ inputs.repo }}
   entrypoint: ${{ inputs.entrypoint }}
-  delete_arg: ${{ inputs.delete && '--delete' || '' }}
+  # The include file is renamed whenever versions are added, the old one is removed only after packages.json names the new one
+  delete_arg: ${{ inputs.delete && '--delete-after' || '' }}
   mageos_release: ${{ inputs.mageos_release }}
   mageos_release_arg: ${{ inputs.mageos_release != '' && format('--mageosRelease="{0}"', inputs.mageos_release) || '' }}
   upstream_release_arg: ${{ inputs.upstream_release != '' && format('--upstreamRelease="{0}"', inputs.upstream_release) || '' }}
   release_refs_file_arg: ${{ inputs.release_refs_file != '' && format('--releaseRefsFile="{0}"', inputs.release_refs_file) || '' }}
   publish_tag: ${{ inputs.publish_tag }}
   ledger_file: ${{ inputs.ledger != '' && format('resource/ledger/{0}.tsv', inputs.ledger) || '' }}
-  ledger_mode_arg: ${{ inputs.enforce_ledger && '--mode=gate --update' || '--mode=report --expectDiff="*/project-community-edition-*,*/project-minimal-edition-*"' }}
+  refs_file: ${{ inputs.ledger != '' && format('resource/ledger/{0}-refs.tsv', inputs.ledger) || '' }}
+  incremental: ${{ inputs.ledger != '' && inputs.enforce_ledger && !inputs.full_rebuild }}
+  refs_out_arg: ${{ inputs.ledger != '' && inputs.enforce_ledger && '--refsOut="$RUNNER_TEMP/refs-pending.json"' || '' }}
+  ledger_mode_arg: ${{ inputs.enforce_ledger && '--mode=gate --update --refs="$refs_file" --pendingRefs="$RUNNER_TEMP/refs-pending.json"' || '--mode=report --expectDiff="*/project-community-edition-*,*/project-minimal-edition-*"' }}
   ledger_alias_repoint_arg: ${{ inputs.ledger == 'release' && '--allowAliasRepoint' || '' }}
 
 jobs:
@@ -109,6 +118,9 @@ jobs:
             --mageosRelease="${{ inputs.mageos_release }}" --publishTag=${{ inputs.publish_tag }}
         name: "Check the deploy inputs against the ledger"
         if: ${{ inputs.ledger != '' }}
+      - run: node bin/package-ledger.js base --ledger="$ledger_file" --repoUrl="$repo" --satisOutputDir=build
+        name: "Fetch the live metadata the incremental build adds to"
+        if: ${{ env.incremental == 'true' }}
       - uses: shivammathur/setup-php@v2
         with:
           php-version: 8.4
@@ -118,8 +130,13 @@ jobs:
 
       - run: |
           node ${{ env.entrypoint }} --outputDir=build/packages --gitRepoDir=generate-repo/repositories --repoUrl="${{ env.repo }}" \
-            ${{ env.mageos_release_arg }} ${{ env.upstream_release_arg }} ${{ env.release_refs_file_arg }}
+            ${{ env.mageos_release_arg }} ${{ env.upstream_release_arg }} ${{ env.release_refs_file_arg }} ${{ env.refs_out_arg }} \
+            ${{ env.generate_ledger_arg }} ${{ env.base_metadata_arg }}
         name: "Generate the packages for the composer repo"
+        env:
+          # A recorded tag that moved fails every build, an incremental one also skips what the ledger has
+          generate_ledger_arg: ${{ env.incremental == 'true' && '--ledger="$ledger_file" --refs="$refs_file"' || (inputs.ledger != '' && '--refs="$refs_file" --fullRebuild' || '') }}
+          base_metadata_arg: ${{ env.incremental == 'true' && inputs.ledger == 'release' && '--baseMetadata=build' || '' }}
 
       # Composer create-project and composer require have limited support for commit hashes, they check composer-plugin-api constraints
       # of the specified branch HEAD instead of the specified commit hash.
@@ -143,14 +160,18 @@ jobs:
       - run: node bin/package-ledger.js seed --ledger="${{ env.ledger_file }}" --satisOutputDir=build
         name: "Seed satis with the published-time of the packages in the ledger"
         if: ${{ inputs.ledger != '' }}
-      - run: cd satis && bin/satis build /tmp/satis.json ../build && cd -
+      # An incremental build has only the new archives, satis takes the other versions from the live include file.
+      # --repository-url has to be the url of the repository in /tmp/satis.json, character for character.
+      - run: |
+          mkdir -p build/packages
+          cd satis && bin/satis build /tmp/satis.json ../build ${{ env.incremental == 'true' && '--repository-url=../build/packages' || '' }} && cd -
         name: "Run satis"
       - run: cd satis && node ../bin/set-satis-output-url-prefix.js --satisOutputDir=../build --repoUrl="${{ env.repo }}" && cd -
         name: "Fix path to packages in the packages.json satis created"
 
       - run: |
           node bin/package-ledger.js verify --ledger="${{ env.ledger_file }}" --satisOutputDir=build --repoUrl="${{ env.repo }}" \
-            ${{ env.ledger_mode_arg }} ${{ env.ledger_alias_repoint_arg }}
+            ${{ env.ledger_mode_arg }} ${{ env.ledger_alias_repoint_arg }} ${{ env.incremental == 'true' && '--incremental' || '' }}
         name: "Verify the packages against the ledger"
         if: ${{ inputs.ledger != '' }}
       # Uploaded before the ledger is handed over, so the release tag can still be pushed from this run
@@ -171,13 +192,16 @@ jobs:
         if: ${{ inputs.ledger != '' && inputs.enforce_ledger }}
         with:
           name: package-ledger-${{ inputs.ledger }}-${{ github.run_attempt }}
-          path: ${{ env.ledger_file }}
+          path: |
+            ${{ env.ledger_file }}
+            ${{ env.refs_file }}
           if-no-files-found: error
       # Nothing is uploaded before the ledger is on the branch, so the server never has a version the ledger does not know about
       - run: |
           for attempt in $(seq 1 60); do
             git fetch --quiet origin "$GITHUB_REF_NAME"
-            if git show "FETCH_HEAD:$ledger_file" | cmp --silent - "$ledger_file"; then
+            if git show "FETCH_HEAD:$ledger_file" | cmp --silent - "$ledger_file" \
+              && git show "FETCH_HEAD:$refs_file" | cmp --silent - "$refs_file"; then
               exit 0
             fi
             sleep 15

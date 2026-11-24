@@ -12,14 +12,15 @@ const {
 } = require('./../release-build-tools');
 const packageModules = require("../package-modules");
 const {setArchiveBaseDir} = packageModules;
+const {readIncludedVersions} = require('../package-ledger');
 const {generateAliasesFromBuiltPackages} = require("../package-aliases");
 const {buildConfig: releaseInstructions} = require('./../build-config/mageos-release-build-config');
-const {processMirrorInstruction} = require("../mirror-build-tools");
+const {processMirrorInstruction, setupIncrementalBuild} = require("../mirror-build-tools");
 const {fetchPackagistList} = require('../packagist');
 const buildState = require('../type/build-state');
 
 const options = parseOptions(
-  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $releaseRefsFile $upstreamRelease @skipHistory @skipAliases @help|h`,
+  `$outputDir $gitRepoDir $repoUrl $mageosVendor $mageosRelease $releaseRefsFile $upstreamRelease $ledger $refs $refsOut $baseMetadata @fullRebuild @skipHistory @skipAliases @help|h`,
   process.argv
 );
 
@@ -43,6 +44,12 @@ Options:
   --upstreamRelease= Upstream Magento Open Source release to use for package compatibility
   --skipHistory      Skip rebuilding of historic releases
   --skipAliases      Skip building package magento/* aliases to mage-os/* packages
+  --ledger=          Package ledger; versions in it are not built again
+  --refs=            Ref ledger; recorded tags are not read again, and fail the build if they moved
+  --refsOut=         File to write the tags this build processed to, for the ref ledger
+  --baseMetadata=    Satis output dir with the packages.json and include files of the live repository;
+                     with --ledger, the aliases are generated from these and the new packages
+  --fullRebuild      Build every version and tag, even those in --ledger and --refs
 `);
   process.exit(1);
 }
@@ -69,6 +76,16 @@ if (upstreamRelease && ! mageosRelease) {
 
 const {refs: releaseRefs, pins: dependencyPins} = loadReleaseRefs(releaseRefsFile);
 
+const skipPublished = options.ledger && !options.fullRebuild;
+if (skipPublished && !skipAliases && !options.baseMetadata) {
+  throw new Error('--ledger skips published packages the aliases are generated from, it needs --baseMetadata or --skipAliases');
+}
+const baseVersions = skipPublished && !skipAliases
+  ? readIncludedVersions(options.baseMetadata)
+  : null;
+
+const refRecorder = setupIncrementalBuild(options, skipHistory ? [] : releaseInstructions);
+
 let distroRelease = new buildState({
   version: mageosRelease,
   composerRepoUrl: mageosRepoUrl,
@@ -87,7 +104,7 @@ let distroRelease = new buildState({
       for (const instruction of releaseInstructions) {
         instruction.vendor = mageosVendor;
 
-        await processMirrorInstruction(instruction, distroRelease);
+        await processMirrorInstruction(instruction, distroRelease, refRecorder);
       }
     }
 
@@ -126,7 +143,7 @@ let distroRelease = new buildState({
     if (! skipAliases) {
       // Generate magento/* alias packages by scanning all built mage-os packages
       console.log(`\nGenerating magento/* alias packages...`);
-      const aliasPackages = await generateAliasesFromBuiltPackages(archiveDir, packageModules);
+      const aliasPackages = await generateAliasesFromBuiltPackages(archiveDir, packageModules, baseVersions);
       console.log(`Alias generation complete. Created ${Object.keys(aliasPackages).length} alias packages.\n`);
     }
   } catch (exception) {
