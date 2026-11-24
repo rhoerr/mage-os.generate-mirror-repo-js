@@ -85,7 +85,13 @@ class repositoryBuildDefinition {
   extraRefToRelease = [];
 
   /**
-   * @param {{key: String, repoUrl: String, packageDirs: Array, packageIndividual: Array, packageMetaFromDirs: Array, vendor: String, ref: String, fromTag: String, skipTags: {Object}, transform: Object.<String,Array>, fixVersions: {Object}, packageReplacements: {Object}, extraRefToRelease: Array, extraMetapackages: Array}}
+   * @type Array<String> Names of extra metapackages built only for tags with a
+   *  release history file
+   */
+  requireHistory = [];
+
+  /**
+   * @param {{key: String, repoUrl: String, packageDirs: Array, packageIndividual: Array, packageMetaFromDirs: Array, vendor: String, ref: String, fromTag: String, skipTags: {Object}, transform: Object.<String,Array>, fixVersions: {Object}, packageReplacements: {Object}, extraRefToRelease: Array, extraMetapackages: Array, requireHistory: Array<String>}}
    */
   constructor(options) {
     this.key = options.key || this.key;
@@ -105,6 +111,7 @@ class repositoryBuildDefinition {
     this.packageReplacements = this.initPackageReplacements(options.packageReplacements || []);
     this.extraRefToRelease = this.initExtraRefsToRelease(options.extraRefToRelease || []);
     this.extraMetapackages = this.initMetapackageDefinitions(options.extraMetapackages || []);
+    this.requireHistory = options.requireHistory || this.requireHistory;
   }
 
   /**
