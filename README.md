@@ -219,7 +219,7 @@ Things to know when running the `Build, deploy & check Mirror` and `Build, deplo
   with a new time, which conflicts with the recorded ledger. Start a new run, which uses the recorded ledger. For a
   release, first run the `push-release-tag.yml` workflow with the release and the id of the failed run, which pushes
   the tag from that run's working copies artifact. Then leave `mageos_release` empty in the new run, as the guard
-  refuses a published release.
+  refuses a published release, and set `full_rebuild`, as the live metadata does not have the recorded versions.
 - The release tag is pushed once the ledger is recorded and the packages are deployed, without waiting for the
   installation check. The working copies are kept as a workflow artifact for 90 days, to push a lost tag.
 
