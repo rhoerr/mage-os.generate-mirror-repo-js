@@ -143,7 +143,7 @@ const LINK_FIELDS = ['require', 'require-dev', 'replace', 'provide', 'conflict']
 const VERSION_FIELDS = [
   'name', 'version', 'version_normalized', 'dist', 'require', 'require-dev', 'replace', 'provide', 'conflict',
   'suggest', 'type', 'autoload', 'autoload-dev', 'extra', 'bin', 'license', 'description', 'abandoned', 'scripts',
-  'authors', 'support', 'archive', 'homepage', 'keywords', 'published-time',
+  'authors', 'support', 'funding', 'archive', 'homepage', 'keywords', 'published-time',
 ];
 const DIST_FIELDS = ['type', 'url', 'shasum'];
 const PACKAGES_JSON_FIELDS = ['packages', 'includes', 'metadata-url', 'available-packages'];
